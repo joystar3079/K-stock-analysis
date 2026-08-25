@@ -431,7 +431,6 @@ def load_master_data():
 def run_quant_engine_web(version, mode, target_date=None, target_start=None, target_end=None):
     master_df = load_master_data()
     
-    # 💡 [핵심 해결] 오늘 방금 추출한 데이터가 메모리에 있다면 마스터 데이터에 즉시 병합!
     if 'recent_extracted_data' in st.session_state:
         new_df = st.session_state['recent_extracted_data'].copy()
         new_df['Quote Date'] = pd.to_datetime(new_df['Quote Date'])
@@ -528,7 +527,8 @@ st.markdown("**3-in-1 다중 전략 엔진 탑재 (Streamlit Web Version)**")
 
 with st.sidebar:
     st.header("📥 데이터 관리")
-    if st.button("Daily 옵션데이터 추출 (실시간)", use_container_width=True):
+    # 1. 아침에 웹앱 접속 ➔ 'Daily 옵션데이터 추출' 클릭
+    if st.button("Daily 옵션데이터 추출", use_container_width=True):
         st.session_state['run_extraction'] = True
         
     st.divider()
@@ -548,6 +548,7 @@ with st.sidebar:
         with col1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
         with col2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
             
+    # 3. '분석 엔진 가동' 클릭 ➔ 최신 진단 결과 확인
     run_button = st.button("🚀 분석 엔진 가동", type="primary", use_container_width=True)
 
 # --- 액션 1: 데이터 추출 실행 ---
@@ -563,23 +564,20 @@ if st.session_state.get('run_extraction', False):
 # --- 추출된 데이터가 세션에 있으면 화면에 다운로드 및 깃허브 저장 버튼 표시 ---
 if 'recent_extracted_data' in st.session_state:
     df_ext = st.session_state['recent_extracted_data']
-    st.success("✅ 실시간 데이터 추출 및 연산 완료! (이제 아래의 다운로드 버튼을 눌러 저장하거나, 분석 엔진을 가동하세요)")
+    st.success("✅ 실시간 데이터 추출 및 연산 완료! (아래의 [옵션데이터 누적관리] 버튼을 눌러 영구 저장하세요)")
     
     csv = df_ext.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
     quote_date_str = df_ext['Quote Date'].iloc[0].strftime('%Y%m%d')
     file_name = f"EWY Option 분석데이터_{quote_date_str}.csv"
     
-    st.download_button(label="📥 CSV 파일 다운로드 (PC/드라이브 백업용)", data=csv, file_name=file_name, mime='text/csv')
-    
-    # [기준점] 여기까지가 기존에 있던 미리보기 표 코드입니다!
+    st.download_button(label="📥 CSV 파일 임시 다운로드 (PC 백업용)", data=csv, file_name=file_name, mime='text/csv')
     st.dataframe(df_ext.head(5), use_container_width=True, hide_index=True)
     
-    # ==========================================================
-    # 👇 방금 선생님이 물어보신 코드가 정확히 여기에 들어갑니다! 👇
-    # ==========================================================
     st.divider()
     st.markdown("#### ☁️ 클라우드 마스터 데이터베이스 업데이트")
-    if st.button("🚀 추출된 데이터를 GitHub 마스터 파일에 영구 병합하기", type="primary"):
+    
+    # 2. 데이터 확인 후 ➔ '옵션데이터 누적관리' 클릭 (깃허브 영구 저장)
+    if st.button("🚀 옵션데이터 누적관리", type="primary"):
         with st.spinner("GitHub 원본 파일에 덮어쓰는 중입니다... (약 10~20초 소요)"):
             try:
                 # 1. 깃허브 연결 및 마스터 파일 로드
@@ -589,7 +587,7 @@ if 'recent_extracted_data' in st.session_state:
                 repo = g.get_repo(repo_name)
                 file_path = "EWY_Options_V27_App_Master.pkl.gz"
                 
-                # 2. 마스터 데이터와 최신 데이터 병합 (중복 제거 로직 포함)
+                # 2. 마스터 데이터와 최신 데이터 병합 (중복 제거)
                 current_master = load_master_data()
                 new_data = df_ext.copy()
                 new_data['Quote Date'] = pd.to_datetime(new_data['Quote Date'])
@@ -600,25 +598,21 @@ if 'recent_extracted_data' in st.session_state:
                 merged_df = pd.concat([current_master, new_data], ignore_index=True)
                 merged_df = merged_df.drop_duplicates(subset=['Quote Date', 'Expiration Date', 'Option Type', 'Strike'], keep='last').sort_values('Quote Date').reset_index(drop=True)
                 
-                # 3. DataFrame을 pkl.gz 바이트 형태로 변환
+                # 3. 데이터프레임을 pkl.gz 바이트로 변환
                 buffer = io.BytesIO()
                 merged_df.to_pickle(buffer, compression='gzip')
                 content_bytes = buffer.getvalue()
                 
-                # 4. GitHub API를 통해 파일 덮어쓰기 (Commit)
+                # 4. GitHub API를 통해 덮어쓰기 (Commit)
                 contents = repo.get_contents(file_path)
                 commit_message = f"Auto-update master data: {df_ext['Quote Date'].iloc[0]}"
                 repo.update_file(contents.path, commit_message, content_bytes, contents.sha)
                 
-                st.success(f"🎉 성공적으로 GitHub 마스터 파일이 업데이트되었습니다! (누적 데이터: {len(merged_df):,}행)")
-                # 메모리 캐시 초기화 (다음 번 엔진 가동 시 깃허브에서 새로 받도록)
-                st.cache_data.clear() 
+                st.success(f"🎉 성공적으로 GitHub 마스터 파일이 업데이트되었습니다! (총 누적 데이터: {len(merged_df):,}행)")
+                st.cache_data.clear() # 캐시 초기화 (다음 엔진 구동 시 최신 데이터 반영)
                 
             except Exception as e:
                 st.error(f"업데이트 중 오류가 발생했습니다: {e}")
-    # ==========================================================
-    # 👆 추가 코드 끝 👆
-    # ==========================================================
 
 # --- 액션 2: 퀀트 엔진 가동 ---
 if run_button:
