@@ -474,7 +474,7 @@ def run_quant_engine_web(version, mode, target_date=None, target_start=None, tar
         long_p_oi = long_p['Open Interest'].sum()
 
         otm_puts = long_p[long_p['Strike'] < spot]
-        bunker_price = (otm_puts.nlargest(10, 'Open Interest')['Strike'] * otm_puts.nlargest(10, 'Open Interest')['Open Interest']).sum() / otm_puts.nlargest(10, 'Open Interest')['Open Interest'].sum() if not otm_puts.empty and otm_puts.nlargest(10, 'Open Interest')['Open Interest'].sum() > 0 else 0
+        bunker_price = (otm_puts.nlargest(10, 'Open Interest')['Strike'] * otm_puts.nlargest(10, 'Open Interest')['Open Interest']).sum() / otm_puts.nlargest(10, 'Open 기Interest']['Open Interest'].sum() if not otm_puts.empty and otm_puts.nlargest(10, 'Open Interest')['Open Interest'].sum() > 0 else 0
 
         n_p_atm = near_p[(near_p['Strike'] >= atm_lower) & (near_p['Strike'] <= atm_upper)]['Open Interest'].sum()
         n_p_otm = near_p[near_p['Strike'] < atm_lower]['Open Interest'].sum()
