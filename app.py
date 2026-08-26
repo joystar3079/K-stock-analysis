@@ -1,6 +1,6 @@
 """EWY Quant Analytics V28 — Streamlit UI.
 
-모듈화된 구조 위에서 UI, 퀵링크, 새창 열기, 누적 기간, 우측 정렬이 완벽하게 반영된 최종 버전입니다.
+모듈화된 구조 위에서 UI, 퀵링크, 누적 기간, 마스터 최신 다운로드 기능이 완벽하게 반영된 최종 버전입니다. (새창 열기 기능 삭제)
 수학 연산과 로직은 다른 .py 파일들에서 불러옵니다.
 """
 from __future__ import annotations
@@ -53,31 +53,7 @@ div[data-testid="column"] button[kind="secondary"]:hover {
     color: #FF4B4B !important;
 }
 
-/* 2. 새창열기 HTML 버튼을 삭제버튼과 100% 동일하게 맞춤 */
-.custom-new-window-btn {
-    width: 100%;
-    height: 32px;
-    min-height: 32px;
-    padding: 0px;
-    border-radius: 6px;
-    border: 1px solid rgba(128, 128, 128, 0.4);
-    background-color: transparent;
-    color: var(--text-color);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-sizing: border-box;
-    text-decoration: none;
-}
-.custom-new-window-btn:hover {
-    border-color: #FF4B4B;
-    color: #FF4B4B;
-}
-
-/* 3. 마크다운 컨테이너 기본 여백 제거 (상하 높이 정렬용) */
+/* 2. 마크다운 컨테이너 기본 여백 제거 (상하 높이 정렬용) */
 div[data-testid="stMarkdownContainer"] > p {
     margin-bottom: 0px !important;
 }
@@ -132,32 +108,6 @@ def toggle_edit():
 def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [
         r for r in st.session_state["analysis_history"] if r["id"] != item_id]
-
-# 팝업 차단을 완벽하게 우회하는 동기화(Synchronous) 새 탭 기술
-def generate_new_window_link(df, title):
-    html_content = df.to_html(index=False, justify='center')
-    html_template = f"""
-    <!DOCTYPE html>
-    <html><head><meta charset="utf-8"><title>{title}</title>
-    <style>
-        body {{ font-family: 'Malgun Gothic', sans-serif; padding: 20px; color: #333; }}
-        table {{ border-collapse: collapse; width: 100%; font-size: 13px; text-align: center; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; }}
-        th {{ background-color: #f2f2f2; font-weight: bold; }}
-    </style></head><body>
-    <h2>{title}</h2>
-    {html_content}
-    </body></html>
-    """
-    # 줄바꿈 문자를 확실히 제거하여 자바스크립트 오류 방지
-    b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8').replace('\n', '')
-    
-    btn_html = f"""
-    <a href="javascript:void(0);" onclick="var w=window.open(); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">
-        ↗️ 새창 열기
-    </a>
-    """
-    return btn_html
 
 # =====================================================================
 # [엔진 실행 코어 로직] 
@@ -258,7 +208,7 @@ with col_links:
 st.divider()
 
 # =====================================================================
-# [사이드바] 데이터 관리 및 조회 (깃허브 스타일 모던 UI 복원)
+# [사이드바] 데이터 관리 및 조회
 # =====================================================================
 with st.sidebar:
     st.markdown("#### ⛁ 데이터 관리")
@@ -270,22 +220,6 @@ with st.sidebar:
         else:
             st.session_state["recent_extracted_data"] = df_ext
             st.session_state["extract_stats"] = stats
-            
-    # 마스터 데이터 가장 최근 일자 다운로드 기능 추가
-    master_info_sb = load_master_data(st.session_state["master_version"])
-    if not master_info_sb.empty:
-        latest_date_sb = master_info_sb['Quote Date'].max()
-        latest_date_str_sb = pd.to_datetime(latest_date_sb).strftime('%Y-%m-%d')
-        latest_df_sb = master_info_sb[master_info_sb['Quote Date'] == latest_date_sb]
-        csv_sb = latest_df_sb.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        
-        st.download_button(
-            label=f"📥 {latest_date_str_sb} 마스터(최근) 다운로드",
-            data=csv_sb,
-            file_name=f"{SYMBOL}_Master_Latest_{pd.to_datetime(latest_date_sb).strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
 
     st.divider()
     st.markdown("#### ⎈ 퀀트 엔진 버젼 선택")
@@ -310,7 +244,7 @@ with st.sidebar:
     run_button = st.button("🚀 분석 엔진 가동", type="primary", use_container_width=True)
 
 # =====================================================================
-# [결과 화면 1] 데이터 추출 완료 화면 (누적 기간 표시 복원)
+# [결과 화면 1] 데이터 추출 완료 화면 
 # =====================================================================
 if "recent_extracted_data" in st.session_state:
     df_ext = st.session_state["recent_extracted_data"]
@@ -319,24 +253,41 @@ if "recent_extracted_data" in st.session_state:
     st.success(f"✅ 연산 완료 — 전체 {total:,}행 중 유동성 있는 {priced:,}행만 IV 계산 "
                f"(SOFR {stats.get('sofr', '-')}%)")
                
-    # 누적 데이터 기간 계산 표시 완벽 복원
+    # 누적 데이터 기간 계산 표시
     master_info = load_master_data(st.session_state["master_version"])
     if not master_info.empty:
         start_dt = master_info['Quote Date'].min().strftime('%Y-%m-%d')
         end_dt = max(master_info['Quote Date'].max(), pd.to_datetime(df_ext['Quote Date'].iloc[0])).strftime('%Y-%m-%d')
         total_len = len(master_info) + len(df_ext)
         st.info(f"📅 **클라우드 데이터베이스 누적 현황:** {start_dt} ~ {end_dt} (예상 총 {total_len:,}행)")
+        
+        # 깃허브(Master)에 저장되어 있는 가장 최근 날짜의 확실한 데이터를 제공
+        latest_date = master_info['Quote Date'].max()
+        latest_date_str = pd.to_datetime(latest_date).strftime('%Y-%m-%d')
+        latest_df = master_info[master_info['Quote Date'] == latest_date]
+        csv_data = latest_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+        
+        st.download_button(
+            label=f"📥 {latest_date_str} 마스터(최근) 다운로드",
+            data=csv_data,
+            file_name=f"{SYMBOL}_Master_Latest_{pd.to_datetime(latest_date).strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
     else:
         st.info(f"📅 **신규 데이터 기간:** {pd.to_datetime(df_ext['Quote Date'].iloc[0]).strftime('%Y-%m-%d')}")
+        # 마스터 데이터가 아예 없는 최초 구동 시에만 방금 추출한 임시 데이터를 제공
+        quote_str = pd.to_datetime(df_ext["Quote Date"].iloc[0]).strftime("%Y%m%d")
+        csv_data = df_ext.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            label="📥 CSV 파일 임시 다운로드 (PC 백업용)",
+            data=csv_data,
+            file_name=f"{SYMBOL} Option 분석데이터_{quote_str}.csv", 
+            mime="text/csv"
+        )
 
     if stats.get("skipped_expirations"):
         st.warning(f"수집 실패 만기: {', '.join(stats['skipped_expirations'][:5])}")
 
-    quote_str = pd.to_datetime(df_ext["Quote Date"].iloc[0]).strftime("%Y%m%d")
-    st.download_button(
-        "📥 CSV 파일 임시 다운로드 (PC 백업용)",
-        df_ext.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
-        file_name=f"{SYMBOL} Option 분석데이터_{quote_str}.csv", mime="text/csv")
     st.dataframe(df_ext.head(5), use_container_width=True, hide_index=True)
 
     st.divider()
@@ -381,7 +332,7 @@ if run_button:
         st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
 # =====================================================================
-# [결과 화면 3] 분석 결과 비교 히스토리 화면 (오른쪽 정렬 완벽 쌍둥이 통일)
+# [결과 화면 3] 분석 결과 비교 히스토리 화면 (우측 삭제 버튼)
 # =====================================================================
 if st.session_state["analysis_history"]:
     st.divider()
@@ -391,12 +342,9 @@ if st.session_state["analysis_history"]:
         with st.container():
             st.markdown(f"**{record['title']}**")
             
-            # [새창 열기]와 [삭제] 버튼을 오른쪽 끝에 나란히 배치 [7.6 : 1.2 : 1.2 비율]
-            _, btn_col1, btn_col2 = st.columns([7.6, 1.2, 1.2])
-            with btn_col1:
-                new_window_html = generate_new_window_link(record['data'], record['title'])
-                st.markdown(new_window_html, unsafe_allow_html=True)
-            with btn_col2:
+            # [삭제] 버튼을 오른쪽 끝에 배치 [9 : 1 비율]
+            _, btn_col = st.columns([9, 1])
+            with btn_col:
                 st.button("❌ 삭제", key=f"del_{record['id']}",
                           on_click=remove_history_item, args=(record["id"],),
                           use_container_width=True)
