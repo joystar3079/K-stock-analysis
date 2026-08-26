@@ -10,6 +10,7 @@ import warnings
 from github import Github
 import io
 import base64
+import json
 
 warnings.filterwarnings('ignore')
 pd.set_option('display.unicode.east_asian_width', True)
@@ -20,17 +21,44 @@ pd.set_option('display.unicode.east_asian_width', True)
 st.set_page_config(page_title="EWY Quant Analytics V27", page_icon="📈", layout="wide")
 
 # =====================================================================
+# [클라우드 저장소] 퀵링크 영구 저장/불러오기 로직
+# =====================================================================
+def load_quick_links():
+    try:
+        g = Github(st.secrets["GITHUB_TOKEN"])
+        repo = g.get_repo(st.secrets["GITHUB_REPO"])
+        contents = repo.get_contents("quick_links.json")
+        return json.loads(contents.decoded_content.decode('utf-8'))
+    except:
+        return [
+            {"name": "Google Finance", "url": "https://www.google.com/finance"},
+            {"name": "CME FedWatch", "url": "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"},
+            {"name": "TradingView", "url": "https://kr.tradingview.com/"}
+        ]
+
+def save_quick_links(links):
+    try:
+        g = Github(st.secrets["GITHUB_TOKEN"])
+        repo = g.get_repo(st.secrets["GITHUB_REPO"])
+        content_bytes = json.dumps(links, ensure_ascii=False, indent=2).encode('utf-8')
+        try:
+            contents = repo.get_contents("quick_links.json")
+            repo.update_file(contents.path, "Update quick links", content_bytes, contents.sha)
+        except:
+            repo.create_file("quick_links.json", "Create quick links", content_bytes)
+        return True
+    except Exception as e:
+        st.error(f"링크 저장 오류: {e}")
+        return False
+
+# =====================================================================
 # [세션 상태 관리] 히스토리 및 우측 상단 퀵링크 초기화
 # =====================================================================
 if 'analysis_history' not in st.session_state:
     st.session_state['analysis_history'] = []
 
 if 'quick_links' not in st.session_state:
-    st.session_state['quick_links'] = [
-        {"name": "Google Finance", "url": "https://www.google.com/finance"},
-        {"name": "CME FedWatch", "url": "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"},
-        {"name": "TradingView", "url": "https://kr.tradingview.com/"}
-    ]
+    st.session_state['quick_links'] = load_quick_links()
 
 if 'edit_links_mode' not in st.session_state:
     st.session_state['edit_links_mode'] = False
@@ -38,17 +66,9 @@ if 'edit_links_mode' not in st.session_state:
 def toggle_edit():
     st.session_state['edit_links_mode'] = not st.session_state['edit_links_mode']
 
-def apply_links():
-    for i in range(3):
-        st.session_state['quick_links'][i]['name'] = st.session_state[f"edit_name_{i}"]
-        st.session_state['quick_links'][i]['url'] = st.session_state[f"edit_url_{i}"]
-    st.session_state['edit_links_mode'] = False
-    st.session_state['show_link_success'] = True
-
 def remove_history_item(index):
     st.session_state['analysis_history'].pop(index)
 
-# 새 창 띄우기용 HTML/Base64 인코더 함수
 def generate_new_window_link(df, title):
     html_content = df.to_html(index=False, justify='center')
     html_template = f"""
@@ -77,14 +97,12 @@ with col_header:
     st.markdown("**3-in-1 다중 전략 엔진 탑재 (Streamlit Web Version)**")
 
 with col_links:
-    # 퀵링크 제목 및 톱니바퀴 편집 버튼
     head_c1, head_c2 = st.columns([0.85, 0.15])
     with head_c1:
         st.write("🔗 **Quick Links**")
     with head_c2:
         st.button("⚙️", on_click=toggle_edit, key="link_edit_btn", help="링크 편집")
         
-    # 현재 설정된 링크 버튼 출력 (분석엔진가동 Primary 버튼과 동일한 붉은 톤/작은 크기로 커스텀)
     link_cols = st.columns(3)
     for i, link in enumerate(st.session_state['quick_links']):
         with link_cols[i]:
@@ -97,12 +115,10 @@ with col_links:
             """
             st.markdown(btn_html, unsafe_allow_html=True)
             
-    # 적용 완료 알림 메시지 (한 번 보여주고 사라짐)
     if st.session_state.get('show_link_success', False):
-        st.success("✅ 링크 변경 완료!")
+        st.success("✅ 링크 영구 저장 완료!")
         st.session_state['show_link_success'] = False
     
-    # 링크 편집 화면 (버튼 클릭 시에만 등장)
     if st.session_state['edit_links_mode']:
         st.markdown("<br>", unsafe_allow_html=True)
         with st.container():
@@ -110,7 +126,17 @@ with col_links:
                 c1, c2 = st.columns([0.4, 0.6])
                 c1.text_input(f"이름 {i+1}", value=st.session_state['quick_links'][i]['name'], key=f"edit_name_{i}")
                 c2.text_input(f"URL {i+1}", value=st.session_state['quick_links'][i]['url'], key=f"edit_url_{i}")
-            st.button("적용하기", type="primary", use_container_width=True, on_click=apply_links)
+            
+            if st.button("적용하기", type="primary", use_container_width=True):
+                with st.spinner("클라우드에 링크 설정 저장 중..."):
+                    for i in range(3):
+                        st.session_state['quick_links'][i]['name'] = st.session_state[f"edit_name_{i}"]
+                        st.session_state['quick_links'][i]['url'] = st.session_state[f"edit_url_{i}"]
+                    
+                    save_quick_links(st.session_state['quick_links'])
+                    st.session_state['edit_links_mode'] = False
+                    st.session_state['show_link_success'] = True
+                    st.rerun()
 
 st.divider()
 
@@ -672,19 +698,19 @@ def run_quant_engine_web(version, mode, target_date=None, target_start=None, tar
 # [웹 UI] 사이드바 설정 영역
 # =====================================================================
 with st.sidebar:
-    st.header("📥 데이터 관리")
+    st.markdown("#### ⛁ 데이터 관리")
     if st.button("Daily 옵션데이터 추출", use_container_width=True):
         st.session_state['run_extraction'] = True
         
     st.divider()
     
-    st.header("⚙️ 퀀트 엔진 버젼 선택")
-    engine_version = st.radio("버전", ("G버젼_하락추세조정", "C버젼_하락특화", "G버젼_상승특화")) 
+    st.markdown("#### ⎈ 퀀트 엔진 버젼 선택")
+    engine_version = st.radio("버전", ("G버젼_하락추세조정", "C버젼_하락특화", "G버젼_상승특화"), label_visibility="collapsed") 
     
     st.divider()
     
-    st.header("▶ 분석 모드")
-    mode_selection = st.selectbox("조회 방식을 선택하세요", ("최근 시그널 분석", "타임머신 (특정일)", "구간 조회"))
+    st.markdown("#### ◱ 분석 모드")
+    mode_selection = st.selectbox("조회 방식을 선택하세요", ("최근 시그널 분석", "타임머신 (특정일)", "구간 조회"), label_visibility="collapsed")
     
     target_date = target_start = target_end = None
     if mode_selection == "타임머신 (특정일)": target_date = st.date_input("기준일 선택", datetime.today())
@@ -709,6 +735,16 @@ if 'recent_extracted_data' in st.session_state:
     df_ext = st.session_state['recent_extracted_data']
     st.success("✅ 실시간 데이터 추출 및 연산 완료! (아래의 [옵션데이터 누적관리] 버튼을 눌러 영구 저장하세요)")
     
+    # 누적 데이터 기간 계산 표시 로직 추가
+    master_info = load_master_data()
+    if not master_info.empty:
+        start_dt = master_info['Quote Date'].min().strftime('%Y-%m-%d')
+        end_dt = max(master_info['Quote Date'].max(), pd.to_datetime(df_ext['Quote Date'].iloc[0])).strftime('%Y-%m-%d')
+        total_len = len(master_info) + len(df_ext)
+        st.info(f"📅 **클라우드 데이터베이스 누적 현황:** {start_dt} ~ {end_dt} (예상 총 {total_len:,}행)")
+    else:
+        st.info(f"📅 **신규 데이터 기간:** {df_ext['Quote Date'].iloc[0].strftime('%Y-%m-%d')}")
+        
     csv = df_ext.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
     quote_date_str = df_ext['Quote Date'].iloc[0].strftime('%Y%m%d')
     file_name = f"EWY Option 분석데이터_{quote_date_str}.csv"
@@ -772,7 +808,6 @@ if run_button:
                 'title': f"📌 [{timestamp}] {engine_version} | {detail_txt}",
                 'data': result_df
             }
-            # 최신 결과가 맨 위로 오도록 리스트의 맨 앞에 삽입
             st.session_state['analysis_history'].insert(0, record)
 
 # --- 누적된 분석 결과 히스토리 화면 출력 ---
