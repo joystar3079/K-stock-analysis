@@ -1,9 +1,8 @@
 """EWY Quant Analytics V29 — Streamlit UI.
 
-[V29 수정] 이미 마스터에 있는 날짜를 재추출했을 때 두 스냅샷이 뒤섞여
-그 날짜의 지표가 왜곡되던 문제를 고쳤습니다. 병합은 날짜 단위로만
-이루어지고, 충돌이 나면 사용자가 보존/교체를 선택합니다.
-분석 결과에는 항상 '기준일'을 표시해 어느 날짜로 진단했는지 드러냅니다.
+[V29 8개 파일 모듈화 전용 UI]
+수학 연산과 판정 로직은 완벽히 분리되어 다른 파일에서 불러옵니다.
+새창 열기 동기화 우회, 퀵링크, 우측 쌍둥이 버튼 정렬, 마스터 최신 다운로드 기능이 적용되었습니다.
 """
 from __future__ import annotations
 
@@ -11,6 +10,7 @@ import json
 import uuid
 import warnings
 from datetime import datetime
+import base64
 
 import pandas as pd
 import streamlit as st
@@ -29,41 +29,76 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V29",
                    page_icon="📈", layout="wide")
 
+# =====================================================================
+# [웹 UI 전용 CSS] 버튼 크기, 디자인 완벽 쌍둥이 통일
+# =====================================================================
 st.markdown("""
 <style>
+/* 삭제버튼 (Secondary) 크기/포맷 통일 */
 div[data-testid="column"] button[kind="secondary"] {
-    width: 100% !important; height: 32px !important; min-height: 32px !important;
-    padding: 0px !important; border-radius: 6px !important;
-    border: 1px solid rgba(128,128,128,0.4) !important;
-    background-color: transparent !important; color: var(--text-color) !important;
+    width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    padding: 0px !important;
+    border-radius: 6px !important;
+    border: 1px solid rgba(128, 128, 128, 0.4) !important;
+    background-color: transparent !important;
+    color: var(--text-color) !important;
 }
 div[data-testid="column"] button[kind="secondary"] p {
-    font-size: 13px !important; margin: 0px !important; font-weight: 500 !important;
+    font-size: 13px !important;
+    margin: 0px !important;
+    font-weight: 500 !important;
 }
 div[data-testid="column"] button[kind="secondary"]:hover {
-    border-color: #FF4B4B !important; color: #FF4B4B !important;
+    border-color: #FF4B4B !important;
+    color: #FF4B4B !important;
 }
-div[data-testid="stMarkdownContainer"] > p { margin-bottom: 0px !important; }
+
+/* 새창열기 HTML 버튼을 삭제버튼과 100% 동일하게 맞춤 */
+.custom-new-window-btn {
+    width: 100%;
+    height: 32px;
+    min-height: 32px;
+    padding: 0px;
+    border-radius: 6px;
+    border: 1px solid rgba(128, 128, 128, 0.4);
+    background-color: transparent;
+    color: var(--text-color);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    text-decoration: none;
+}
+.custom-new-window-btn:hover {
+    border-color: #FF4B4B;
+    color: #FF4B4B;
+}
+
+/* 마크다운 여백 제거 (버튼 상하 정렬용) */
+div[data-testid="stMarkdownContainer"] > p {
+    margin-bottom: 0px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
-
 # =====================================================================
-# [클라우드 저장소] 퀵링크
+# [클라우드 저장소] 퀵링크 영구 저장/불러오기 로직
 # =====================================================================
 def load_quick_links():
     try:
         repo = Github(st.secrets["GITHUB_TOKEN"]).get_repo(st.secrets["GITHUB_REPO"])
-        return json.loads(repo.get_contents("quick_links.json")
-                          .decoded_content.decode("utf-8"))
+        return json.loads(repo.get_contents("quick_links.json").decoded_content.decode("utf-8"))
     except Exception:
         return [
             {"name": "Google Finance", "url": "https://www.google.com/finance"},
-            {"name": "CME FedWatch",
-             "url": "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"},
+            {"name": "CME FedWatch", "url": "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"},
             {"name": "TradingView", "url": "https://kr.tradingview.com/"},
         ]
-
 
 def save_quick_links(links):
     try:
@@ -79,32 +114,51 @@ def save_quick_links(links):
         st.error(f"링크 저장 오류: {e}")
         return False
 
-
 # =====================================================================
-# [세션 상태]
+# [세션 상태 관리]
 # =====================================================================
 st.session_state.setdefault("analysis_history", [])
 st.session_state.setdefault("master_version", "")
-st.session_state.setdefault("merge_policy", "skip")   # skip | replace
+st.session_state.setdefault("merge_policy", "skip")
 st.session_state.setdefault("edit_links_mode", False)
+
 if "quick_links" not in st.session_state:
     st.session_state["quick_links"] = load_quick_links()
 
-
 def toggle_edit():
     st.session_state["edit_links_mode"] = not st.session_state["edit_links_mode"]
-
 
 def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [
         r for r in st.session_state["analysis_history"] if r["id"] != item_id]
 
+def generate_new_window_link(df, title):
+    html_content = df.to_html(index=False, justify='center')
+    html_template = f"""
+    <!DOCTYPE html>
+    <html><head><meta charset="utf-8"><title>{title}</title>
+    <style>
+        body {{ font-family: 'Malgun Gothic', sans-serif; padding: 20px; color: #333; }}
+        table {{ border-collapse: collapse; width: 100%; font-size: 13px; text-align: center; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+    </style></head><body>
+    <h2>{title}</h2>
+    {html_content}
+    </body></html>
+    """
+    b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8').replace('\n', '')
+    btn_html = f"""
+    <a href="javascript:void(0);" onclick="var w=window.open(); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">
+        ↗️ 새창 열기
+    </a>
+    """
+    return btn_html
 
 # =====================================================================
 # [엔진 실행 코어]
 # =====================================================================
 def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
-    """마스터 + (선택적) 신규추출 → 전체 진단 프레임. (df, 메타) 반환."""
     cfg = ENGINES[version]
     meta: dict = {}
 
@@ -117,7 +171,6 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
         rep = merge_report(master_df, new)
         meta["merge_report"] = rep
         policy = st.session_state["merge_policy"]
-        # 새 날짜가 하나도 없고 정책이 skip 이면 병합할 이유가 없습니다
         if rep["new_dates"] or policy == "replace":
             master_df = merge_master(master_df, new, on_conflict=policy)
             meta["merged_extraction"] = True
@@ -139,7 +192,6 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
     meta["latest_date"] = df["Date"].max()
     meta["n_dates"] = len(df)
     return df, meta
-
 
 def run_quant_engine(version: str, mode: str, target_date=None,
                      target_start=None, target_end=None) -> tuple[pd.DataFrame, dict]:
@@ -164,7 +216,6 @@ def run_quant_engine(version: str, mode: str, target_date=None,
     sel["Close Price"] = sel["Close Price"].round(2)
     return sel.rename(columns={"Close Price": f"{SYMBOL}($)",
                                "Phase": "현재 시장 국면 진단"}), meta
-
 
 # =====================================================================
 # [상단 UI]
@@ -258,7 +309,7 @@ with st.sidebar:
     run_button = st.button("🚀 분석 엔진 가동", type="primary", use_container_width=True)
 
 # =====================================================================
-# [결과 화면 1] 추출 완료 + 병합 정책
+# [결과 화면 1] 추출 완료 + 마스터 최신 다운로드 + 병합 정책
 # =====================================================================
 if "recent_extracted_data" in st.session_state:
     df_ext = st.session_state["recent_extracted_data"]
@@ -271,7 +322,6 @@ if "recent_extracted_data" in st.session_state:
     master_info = load_master_data(st.session_state["master_version"])
     rep = merge_report(master_info, df_ext)
 
-    # ── 날짜 충돌 경고 및 정책 선택 ────────────────────────────────
     if rep["conflict_dates"]:
         st.warning(
             f"⚠️ 추출본의 날짜 **{', '.join(str(d) for d in rep['conflict_dates'])}** 가 "
@@ -302,11 +352,19 @@ if "recent_extracted_data" in st.session_state:
             data=latest_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
             file_name=f"{SYMBOL}_Master_Latest_{latest.strftime('%Y%m%d')}.csv",
             mime="text/csv")
+    else:
+        quote_str = pd.to_datetime(df_ext["Quote Date"].iloc[0]).strftime("%Y%m%d")
+        csv_data = df_ext.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            label="📥 CSV 파일 임시 다운로드 (PC 백업용)",
+            data=csv_data,
+            file_name=f"{SYMBOL} Option 분석데이터_{quote_str}.csv", 
+            mime="text/csv"
+        )
 
     if stats.get("skipped_expirations"):
         st.warning(f"수집 실패 만기: {', '.join(stats['skipped_expirations'][:5])}")
 
-    # ── 진단 패널 ──────────────────────────────────────────────────
     with st.expander("🔬 날짜 구성 진단 — 마스터 vs 추출본 비교"):
         diag_date = st.date_input(
             "진단할 날짜",
@@ -373,7 +431,7 @@ if run_button:
             st.session_state["analysis_history"][:MAX_HISTORY]
 
 # =====================================================================
-# [결과 화면 3] 히스토리
+# [결과 화면 3] 히스토리 (오른쪽 정렬 완벽 쌍둥이 통일)
 # =====================================================================
 if st.session_state["analysis_history"]:
     st.divider()
@@ -381,10 +439,16 @@ if st.session_state["analysis_history"]:
     for record in st.session_state["analysis_history"]:
         with st.container():
             st.markdown(f"**{record['title']}**")
-            _, btn_col = st.columns([9, 1])
-            with btn_col:
+            
+            # [새창 열기]와 [삭제] 버튼을 오른쪽 끝에 나란히 배치 [8 : 1 : 1 비율]
+            _, btn_col1, btn_col2 = st.columns([8, 1, 1])
+            with btn_col1:
+                new_window_html = generate_new_window_link(record['data'], record['title'])
+                st.markdown(new_window_html, unsafe_allow_html=True)
+            with btn_col2:
                 st.button("❌ 삭제", key=f"del_{record['id']}",
                           on_click=remove_history_item, args=(record["id"],),
                           use_container_width=True)
+                          
             st.dataframe(record["data"], use_container_width=True, hide_index=True)
             st.write("")
