@@ -18,6 +18,13 @@ pd.set_option('display.unicode.east_asian_width', True)
 # =====================================================================
 st.set_page_config(page_title="EWY Quant Analytics V27", page_icon="📈", layout="wide")
 
+# 세션 상태(Session State)에 분석 히스토리 저장소 초기화
+if 'analysis_history' not in st.session_state:
+    st.session_state['analysis_history'] = []
+
+def remove_history_item(index):
+    st.session_state['analysis_history'].pop(index)
+
 # =====================================================================
 # [수학 엔진] 미국식 이항 모형 (IV) 및 B-S 모형 (Delta)
 # =====================================================================
@@ -220,9 +227,7 @@ def apply_logic_g_down(df):
     df['Phase'] = phase_list
     return df
 
-# 💡 [핵심 업데이트] C버젼을 C버젼_하락특화로 변경하며 4차원 찐바닥 에너지 계산기 완벽 이식
 def apply_logic_c(df):
-    # 1. 사전 백분위 연산 및 시차 메모리(5D) 셋업
     df['Near_C_Pct'] = df['Near_C_Ratio'].rolling(window=60, min_periods=1).rank(pct=True) * 100
     df['Near_P_Pct'] = df['Near_P_Ratio'].rolling(window=60, min_periods=1).rank(pct=True) * 100
     capped_growth = df['Long_P_OI_Growth'].fillna(0).clip(upper=200.0)
@@ -268,8 +273,6 @@ def apply_logic_c(df):
                 else: phase = "📈 대세 상승 추세 진행 중" if mid_trend_up else "🚀 하락 멈춤 / 단기 상승 전환 (본대 투입)"
         else:
             ceiling_active = False
-
-            # 4차원 찐바닥 에너지 충전율 계산 (낙폭 & 시차 보정)
             recent_n_pct = r['Recent_5D_Near_C_Pct'] if pd.notna(r['Recent_5D_Near_C_Pct']) else 0
             recent_l_pct = r['Recent_5D_Bunker_Pct'] if pd.notna(r['Recent_5D_Bunker_Pct']) else 0
 
@@ -296,7 +299,6 @@ def apply_logic_c(df):
                     if atm_dom >= 60.0: phase = "⚠️ 가짜 반등 주의 (조건 충족되나 기관 ATM 숏 압박 지속)" if not mid_trend_up else "⚠️ 섣부른 눌림목 주의 (기관 ATM 숏 압박 팽팽함)"
                     else: phase = "🔥 퍼펙트 찐바닥 포착 (단기 하방 압박 소멸 / V자 반등 임박)" if not mid_trend_up else "🔥 퍼펙트 눌림목 포착 (상승장 속 하방 압박 해제)"
 
-            # 동적 텍스트 오버라이드
             if "퍼펙트" not in phase:
                 if bottom_prob >= 90.0:
                     if "가짜 반등" not in phase and "압박 팽팽함" not in phase:
@@ -345,15 +347,15 @@ def apply_logic_c(df):
         bunker_p = r['Bunker_Price']
         bunker_str = f" (벽: ${bunker_p:.1f} / 규모: {l_raw:.1f}배)" if bunker_p > 0 else f" (규모: {l_raw:.1f}배)"
 
-        if n_pct >= 99: s_bot = f"[투매강도: {n_raw:.1f}배] 🚨 항복 선언 (완전한 패닉){atm_str}"
-        elif n_pct >= 95: s_bot = f"[투매강도: {n_raw:.1f}배] 🩸 패닉 셀링 (악성 매물 투매){atm_str}"
-        elif n_pct >= 90: s_bot = f"[투매강도: {n_raw:.1f}배] 🟡 투매 발생 (손절 시작){atm_str}"
-        else: s_bot = f"[투매강도: {n_raw:.1f}배] ➖ 평상시 (매물 소화 중){atm_str}"
+        if n_pct >= 99: s_bot = f"[강도: {n_raw:.1f}배] 🚨 항복 선언{atm_str}"
+        elif n_pct >= 95: s_bot = f"[강도: {n_raw:.1f}배] 🩸 패닉 셀링{atm_str}"
+        elif n_pct >= 90: s_bot = f"[강도: {n_raw:.1f}배] 🟡 투매 발생{atm_str}"
+        else: s_bot = f"[강도: {n_raw:.1f}배] ➖ 평상시{atm_str}"
 
-        if l_pct >= 99: l_bot = f"[매집강도: {l_raw:.1f}배] 🚨 역사적 벙커{bunker_str}"
-        elif l_pct >= 95: l_bot = f"[매집강도: {l_raw:.1f}배] 🛡️ 강력 방어벽{bunker_str}"
-        elif l_pct >= 90: l_bot = f"[매집강도: {l_raw:.1f}배] 🏗️ 일반 방어벽{bunker_str}"
-        else: l_bot = f"[매집강도: {l_raw:.1f}배] ➖ 평상시 (방어벽 없음){bunker_str}"
+        if l_pct >= 99: l_bot = f"[강도: {l_raw:.1f}배] 🚨 역사적 벙커{bunker_str}"
+        elif l_pct >= 95: l_bot = f"[강도: {l_raw:.1f}배] 🛡️ 강력 방어벽{bunker_str}"
+        elif l_pct >= 90: l_bot = f"[강도: {l_raw:.1f}배] 🏗️ 일반 방어벽{bunker_str}"
+        else: l_bot = f"[강도: {l_raw:.1f}배] ➖ 평상시{bunker_str}"
 
         if trend_up:
             top_short_list.append(s_top); top_long_list.append(l_top); bot_short_list.append("-"); bot_long_list.append("-")
@@ -560,7 +562,7 @@ def run_quant_engine_web(version, mode, target_date=None, target_start=None, tar
     df['20MA'] = df['Close Price'].rolling(window=20, min_periods=1).mean()
 
     if version == "G버젼_하락추세조정": df = apply_logic_g_down(df)
-    elif version == "C버젼_하락특화": df = apply_logic_c(df) # 엔진 라우터 수정 완료
+    elif version == "C버젼_하락특화": df = apply_logic_c(df)
     elif version == "G버젼_상승특화": df = apply_logic_g_up(df)
 
     if mode == "구간 조회" and target_start and target_end: out_df = df[(df['Date'] >= pd.to_datetime(target_start)) & (df['Date'] <= pd.to_datetime(target_end))].copy()
@@ -585,14 +587,12 @@ st.markdown("**3-in-1 다중 전략 엔진 탑재 (Streamlit Web Version)**")
 
 with st.sidebar:
     st.header("📥 데이터 관리")
-    # 1. 아침에 웹앱 접속 ➔ 'Daily 옵션데이터 추출' 클릭
     if st.button("Daily 옵션데이터 추출", use_container_width=True):
         st.session_state['run_extraction'] = True
         
     st.divider()
     
     st.header("⚙️ 퀀트 엔진 버젼 선택")
-    # 메뉴명 "C버젼_하락특화"로 통일 완료
     engine_version = st.radio("버전", ("G버젼_하락추세조정", "C버젼_하락특화", "G버젼_상승특화")) 
     
     st.divider()
@@ -607,7 +607,6 @@ with st.sidebar:
         with col1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
         with col2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
             
-    # 3. '분석 엔진 가동' 클릭 ➔ 최신 진단 결과 확인
     run_button = st.button("🚀 분석 엔진 가동", type="primary", use_container_width=True)
 
 # --- 액션 1: 데이터 추출 실행 ---
@@ -620,7 +619,6 @@ if st.session_state.get('run_extraction', False):
             st.session_state['recent_extracted_data'] = df_ext
     st.session_state['run_extraction'] = False
 
-# --- 추출된 데이터가 세션에 있으면 화면에 다운로드 및 깃허브 저장 버튼 표시 ---
 if 'recent_extracted_data' in st.session_state:
     df_ext = st.session_state['recent_extracted_data']
     st.success("✅ 실시간 데이터 추출 및 연산 완료! (아래의 [옵션데이터 누적관리] 버튼을 눌러 영구 저장하세요)")
@@ -635,18 +633,15 @@ if 'recent_extracted_data' in st.session_state:
     st.divider()
     st.markdown("#### ☁️ 클라우드 마스터 데이터베이스 업데이트")
     
-    # 2. 데이터 확인 후 ➔ '옵션데이터 누적관리' 클릭 (깃허브 영구 저장)
     if st.button("🚀 옵션데이터 누적관리", type="primary"):
         with st.spinner("GitHub 원본 파일에 덮어쓰는 중입니다... (약 10~20초 소요)"):
             try:
-                # 1. 깃허브 연결 및 마스터 파일 로드
                 token = st.secrets["GITHUB_TOKEN"]
                 repo_name = st.secrets["GITHUB_REPO"]
                 g = Github(token)
                 repo = g.get_repo(repo_name)
                 file_path = "EWY_Options_V27_App_Master.pkl.gz"
                 
-                # 2. 마스터 데이터와 최신 데이터 병합 (중복 제거)
                 current_master = load_master_data()
                 new_data = df_ext.copy()
                 new_data['Quote Date'] = pd.to_datetime(new_data['Quote Date'])
@@ -657,23 +652,21 @@ if 'recent_extracted_data' in st.session_state:
                 merged_df = pd.concat([current_master, new_data], ignore_index=True)
                 merged_df = merged_df.drop_duplicates(subset=['Quote Date', 'Expiration Date', 'Option Type', 'Strike'], keep='last').sort_values('Quote Date').reset_index(drop=True)
                 
-                # 3. 데이터프레임을 pkl.gz 바이트로 변환
                 buffer = io.BytesIO()
                 merged_df.to_pickle(buffer, compression='gzip')
                 content_bytes = buffer.getvalue()
                 
-                # 4. GitHub API를 통해 덮어쓰기 (Commit)
                 contents = repo.get_contents(file_path)
                 commit_message = f"Auto-update master data: {df_ext['Quote Date'].iloc[0]}"
                 repo.update_file(contents.path, commit_message, content_bytes, contents.sha)
                 
                 st.success(f"🎉 성공적으로 GitHub 마스터 파일이 업데이트되었습니다! (총 누적 데이터: {len(merged_df):,}행)")
-                st.cache_data.clear() # 캐시 초기화 (다음 엔진 구동 시 최신 데이터 반영)
+                st.cache_data.clear() 
                 
             except Exception as e:
                 st.error(f"업데이트 중 오류가 발생했습니다: {e}")
 
-# --- 액션 2: 퀀트 엔진 가동 ---
+# --- 액션 2: 퀀트 엔진 가동 (결과 누적 로직) ---
 if run_button:
     with st.spinner(f"[{engine_version}] 퀀트 엔진 연산 중..."):
         result_df = run_quant_engine_web(engine_version, mode_selection, target_date, target_start, target_end)
@@ -682,4 +675,41 @@ if run_button:
             st.success(f"✅ 연산이 완료되었습니다! ({mode_selection})")
             if 'recent_extracted_data' in st.session_state:
                 st.info("💡 방금 추출한 최신 실시간 데이터가 결합되어 진단되었습니다.")
-            st.dataframe(result_df, use_container_width=True, hide_index=True, height=400)
+            
+            # 히스토리 추가를 위한 데이터 패키징
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            detail_txt = mode_selection
+            if mode_selection == "타임머신 (특정일)": detail_txt += f" ({target_date})"
+            elif mode_selection == "구간 조회": detail_txt += f" ({target_start} ~ {target_end})"
+                
+            record = {
+                'id': timestamp,
+                'title': f"📌 [{timestamp}] {engine_version} | {detail_txt}",
+                'data': result_df
+            }
+            # 최신 결과가 맨 위로 오도록 리스트의 맨 앞에 삽입
+            st.session_state['analysis_history'].insert(0, record)
+
+# --- 누적된 분석 결과 히스토리 화면 출력 ---
+if st.session_state['analysis_history']:
+    st.divider()
+    
+    col_title, col_clear = st.columns([0.85, 0.15])
+    with col_title:
+        st.header("📊 분석 결과 비교 히스토리")
+    with col_clear:
+        if st.button("🗑️ 전체 삭제", use_container_width=True):
+            st.session_state['analysis_history'] = []
+            st.rerun()
+
+    for i, record in enumerate(st.session_state['analysis_history']):
+        with st.container():
+            c1, c2 = st.columns([0.9, 0.1])
+            with c1:
+                st.markdown(f"**{record['title']}**")
+            with c2:
+                st.button("❌ 삭제", key=f"del_{record['id']}", on_click=remove_history_item, args=(i,), use_container_width=True)
+            
+            # height 고정값을 없애 데이터 양만큼 시원하게 풀스크린으로 출력되도록 수정
+            st.dataframe(record['data'], use_container_width=True, hide_index=True)
+            st.write("") # 간격 띄우기
