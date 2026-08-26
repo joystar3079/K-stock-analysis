@@ -220,82 +220,140 @@ def apply_logic_g_down(df):
     df['Phase'] = phase_list
     return df
 
+# 💡 [핵심 업데이트] C버젼을 C버젼_하락특화로 변경하며 4차원 찐바닥 에너지 계산기 완벽 이식
 def apply_logic_c(df):
-    bottom_flags, near_scores, long_scores, hybrid_scores = [], [], [], []
-    for i, r in df.iterrows():
-        nc_ratio = r['Near_C_Ratio']
-        nc_drop = r['Near_C_Ratio_Drop'] if pd.notna(r['Near_C_Ratio_Drop']) else 0
-        n_score = max(0, (nc_ratio * 3.33) + (nc_drop * 10))
-        lp_ratio = r['Long_P_Ratio']
-        lp_growth = r['Long_P_OI_Growth'] if pd.notna(r['Long_P_OI_Growth']) else 0
-        l_score = max(0, (lp_ratio * 10) + (min(lp_growth, 200.0) * 2))
-        h_score = (n_score + l_score) / 2
-        near_scores.append(int(n_score)); long_scores.append(int(l_score)); hybrid_scores.append(int(h_score))
-        bottom_flags.append(1 if (h_score >= 100 or l_score >= 100) else 0)
-
-    df['Bottom_Flag'] = bottom_flags
-    df['Recent_Bottom'] = df['Bottom_Flag'].rolling(window=5, min_periods=1).max()
-    df['Top_Warning_Flag'] = (df['Near_P_Ratio'] > 30.0).astype(int)
+    # 1. 사전 백분위 연산 및 시차 메모리(5D) 셋업
+    df['Near_C_Pct'] = df['Near_C_Ratio'].rolling(window=60, min_periods=1).rank(pct=True) * 100
+    df['Near_P_Pct'] = df['Near_P_Ratio'].rolling(window=60, min_periods=1).rank(pct=True) * 100
+    capped_growth = df['Long_P_OI_Growth'].fillna(0).clip(upper=200.0)
+    df['Raw_Bunker_Score'] = (df['Long_P_Ratio'] * 10) + (capped_growth * 2)
+    df['Bunker_Pct'] = df['Raw_Bunker_Score'].rolling(window=252, min_periods=1).rank(pct=True) * 100
+    
+    df['Recent_5D_Near_C_Pct'] = df['Near_C_Pct'].rolling(window=5, min_periods=1).max()
+    df['Recent_5D_Bunker_Pct'] = df['Bunker_Pct'].rolling(window=5, min_periods=1).max()
+    
+    df['Top_Warning_Flag'] = (df['Near_P_Pct'] >= 95.0).astype(int)
     df['Recent_Top_Warning'] = df['Top_Warning_Flag'].rolling(window=3, min_periods=1).max()
 
     phase_list = []
     ceiling_active = False
     prev_close = 0.0
+    bottom_flags = []
 
     for i, r in df.iterrows():
         curr_close = r['Close Price']
-        trend_up, mid_trend_up = curr_close > r['10MA'], r['10MA'] > r['20MA']
+        trend_up = curr_close > r['10MA']
+        mid_trend_up = r['10MA'] > r['20MA']
+
+        n_pct = r['Near_C_Pct'] if pd.notna(r['Near_C_Pct']) else 0
+        l_pct = r['Bunker_Pct'] if pd.notna(r['Bunker_Pct']) else 0
+        atm_dom = r['ATM_Put_Dominance'] if pd.notna(r['ATM_Put_Dominance']) else 50.0
+
         phase = ""
+
         if trend_up:
+            bottom_flags.append(0)
             is_warning = r['Recent_Top_Warning'] > 0
             is_rollup = pd.notna(r['Long_P_Wgt_Rollup']) and r['Long_P_Wgt_Rollup'] > 2.0
-            if is_warning and is_rollup: ceiling_active = True; phase = "⛔ 대천장(Ceiling) 확정 / 세력 방어벽 롤업 (전량 익절)"
-            elif ceiling_active and curr_close > prev_close: ceiling_active = True; phase = "⛔ 대천장 유지 / 가짜 랠리 (익절 유지)"
+
+            if is_warning and is_rollup:
+                ceiling_active = True
+                phase = "⛔ 대천장(Ceiling) 확정 / 세력의 원월물 방어벽 롤업 완료 (전량 익절)"
+            elif ceiling_active and curr_close > prev_close:
+                ceiling_active = True
+                phase = "⛔ 대천장 유지 / 확정 이후 주가 추가 상승 (가짜 랠리 / 익절 유지)"
             else:
                 ceiling_active = False
-                if is_warning: phase = "⚠️ 상승장 고점 경계령 (근월물 풋 투매 / 비중축소)"
-                elif mid_trend_up: phase = "📈 대세 상승 추세 진행 중"
-                elif r['Recent_Bottom'] > 0: phase = "🚀 하락 멈춤 / 바닥 확인 상승 전환 (본대 투입)"
-                else: phase = "➖ 대세 하락 속 횡보 (가짜 반등 주의)"
+                if is_warning: phase = "⚠️ 상승장 속 고점 경계령 (단기 풋 투매 폭발 / 비중축소)"
+                else: phase = "📈 대세 상승 추세 진행 중" if mid_trend_up else "🚀 하락 멈춤 / 단기 상승 전환 (본대 투입)"
         else:
             ceiling_active = False
-            n_score, l_score, h_score = near_scores[i], long_scores[i], hybrid_scores[i]
-            if h_score >= 100: phase = "🔥 패닉셀 붕괴 / 완전체(Hybrid) 찐바닥 포착" if not mid_trend_up else "⚡ 상승장 속 하이브리드 눌림목"
-            elif n_score >= 100 and l_score < 100: phase = "🔪 근월물 단기 투매 (칼날 주의 / 방어벽 없음)"
-            elif l_score >= 100 and n_score < 100: phase = "🛡️ 원월물 벙커 매집 (하방경직 구축)"
-            else: phase = "📉 단기 조정 진행 중" if mid_trend_up else "📉 본격 하락 추세 진행 중"
+
+            # 4차원 찐바닥 에너지 충전율 계산 (낙폭 & 시차 보정)
+            recent_n_pct = r['Recent_5D_Near_C_Pct'] if pd.notna(r['Recent_5D_Near_C_Pct']) else 0
+            recent_l_pct = r['Recent_5D_Bunker_Pct'] if pd.notna(r['Recent_5D_Bunker_Pct']) else 0
+
+            n_prob = min(100.0, (recent_n_pct / 95.0) * 100.0)
+            l_prob = min(100.0, (recent_l_pct / 95.0) * 100.0)
+
+            disparity = (curr_close / r['20MA']) * 100.0 if r['20MA'] > 0 else 100.0
+            p_prob = max(0.0, min(100.0, (98.0 - disparity) / 8.0 * 100.0))
+
+            atm_prob = max(0.0, min(100.0, (100.0 - atm_dom) / 40.0 * 100.0))
+            bottom_prob = (n_prob + l_prob + p_prob + atm_prob) / 4.0
+            prob_str = f" 🔋[에너지: {bottom_prob:.1f}% | 낙폭: {p_prob:.0f}점]"
+
+            if l_pct < 95:
+                bottom_flags.append(0)
+                if n_pct >= 95: phase = "🔪 단기 투매 발생 (방어벽 부재 / 섣부른 눌림목 매수 금지)" if mid_trend_up else "🔪 개미 패닉셀 발생 (세력 방어벽 부재 / 떨어지는 칼날 주의)"
+                else: phase = "📉 단기 조정 진행 중 (방어벽 없음 / 관망)" if mid_trend_up else "📉 본격 하락 추세 진행 중 (투매 및 방어벽 없음 / 관망)"
+            else:
+                if n_pct < 95:
+                    bottom_flags.append(0)
+                    phase = "🛡️ 강력 세력 방어벽 셋업 (개미 투매 및 눌림목 대기)" if mid_trend_up else "🛡️ 강력 세력 벙커 구축 중 (개미 투매 대기)"
+                else:
+                    bottom_flags.append(1)
+                    if atm_dom >= 60.0: phase = "⚠️ 가짜 반등 주의 (조건 충족되나 기관 ATM 숏 압박 지속)" if not mid_trend_up else "⚠️ 섣부른 눌림목 주의 (기관 ATM 숏 압박 팽팽함)"
+                    else: phase = "🔥 퍼펙트 찐바닥 포착 (단기 하방 압박 소멸 / V자 반등 임박)" if not mid_trend_up else "🔥 퍼펙트 눌림목 포착 (상승장 속 하방 압박 해제)"
+
+            # 동적 텍스트 오버라이드
+            if "퍼펙트" not in phase:
+                if bottom_prob >= 90.0:
+                    if "가짜 반등" not in phase and "압박 팽팽함" not in phase:
+                        phase = "⏳ 찐바닥 셋업 극대화 (조건 90% 이상 충족 / 예의 주시)" if not mid_trend_up else "⏳ 눌림목 셋업 극대화 (조건 90% 이상 충족)"
+                elif bottom_prob >= 80.0:
+                    if "본격 하락" in phase or "단기 조정" in phase:
+                        phase = "🟡 바닥 다지기 진행 중 (반등 에너지 80% 이상 응집)" if not mid_trend_up else "🟡 견조한 조정 진행 중 (눌림목 에너지 응집)"
+
+            phase = phase + prob_str
+            
         prev_close = curr_close
         phase_list.append(phase)
+
+    df['Bottom_Flag'] = bottom_flags
+    df['Recent_Bottom'] = df['Bottom_Flag'].rolling(window=5, min_periods=1).max()
 
     top_short_list, top_long_list, bot_short_list, bot_long_list = [], [], [], []
     for i, r in df.iterrows():
         trend_up = r['Close Price'] > r['10MA']
-        np_ratio = r['Near_P_Ratio']
+        np_pct = r['Near_P_Pct']
+        np_raw = r['Near_P_Ratio']
         rollup = r['Long_P_Wgt_Rollup'] if pd.notna(r['Long_P_Wgt_Rollup']) else 0
 
-        if np_ratio >= 100: s_top = f"{np_ratio:.1f}배 🚨 극단적 풋 투매"
-        elif np_ratio >= 30: s_top = f"{np_ratio:.1f}배 ⚠️ 고점 발작"
-        elif np_ratio >= 15: s_top = f"{np_ratio:.1f}배 🟡 헷징 증가"
-        else: s_top = f"{np_ratio:.1f}배 ➖ 안정적"
+        if np_pct >= 99: s_top = f"[{np_pct:.0f}점] 🚨 극단적 풋 투매 (규모: {np_raw:.1f}배)"
+        elif np_pct >= 95: s_top = f"[{np_pct:.0f}점] ⚠️ 고점 발작 (규모: {np_raw:.1f}배)"
+        elif np_pct >= 90: s_top = f"[{np_pct:.0f}점] 🟡 헷징 증가 (규모: {np_raw:.1f}배)"
+        else: s_top = f"[{np_pct:.0f}점] ➖ 안정적 (특이사항 없음)"
 
-        if rollup >= 4.0: l_top = f"+${rollup:.2f} 💀 역사적 대천장"
-        elif rollup >= 2.0: l_top = f"+${rollup:.2f} ⛔ 롤업 확정"
-        elif rollup >= 0.5: l_top = f"+${rollup:.2f} 🟡 인상 조짐"
-        else: l_top = f"{rollup:+.2f} ➖ 평상시"
+        if rollup >= 4.0: l_top = f"+${rollup:.2f} 💀 거대 세력 탈출 (역사적 대천장)"
+        elif rollup >= 2.0: l_top = f"+${rollup:.2f} ⛔ 롤업 확정 (세력 엑시트)"
+        elif rollup >= 0.5: l_top = f"+${rollup:.2f} 🟡 방어벽 인상 조짐"
+        else: l_top = f"{rollup:+.2f} ➖ 평상시 (유지)"
 
-        n_score, l_score = near_scores[i], long_scores[i]
+        n_pct = r['Near_C_Pct'] if pd.notna(r['Near_C_Pct']) else 0
+        n_raw = r['Near_C_Ratio']
+        l_pct = r['Bunker_Pct'] if pd.notna(r['Bunker_Pct']) else 0
+        l_raw = r['Long_P_Ratio']
+        atm_dom = r['ATM_Put_Dominance']
+
+        if atm_dom > 85.0: atm_level = "(MAX 🚨)"
+        elif atm_dom >= 70.0: atm_level = "(위험 ⚠️)"
+        elif atm_dom >= 55.0: atm_level = "(경계 🟡)"
+        else: atm_level = "(해제 🟢)"
+        atm_str = f" [하방압력: {atm_dom:.1f}% {atm_level}]"
+
         bunker_p = r['Bunker_Price']
-        bunker_str = f" (벽: ${bunker_p:.1f})" if bunker_p > 0 else ""
+        bunker_str = f" (벽: ${bunker_p:.1f} / 규모: {l_raw:.1f}배)" if bunker_p > 0 else f" (규모: {l_raw:.1f}배)"
 
-        if n_score >= 500: s_bot = f"{n_score}점 🚨 항복 선언 (완전 패닉)"
-        elif n_score >= 300: s_bot = f"{n_score}점 🩸 패닉 셀링"
-        elif n_score >= 100: s_bot = f"{n_score}점 🟡 투매 발생"
-        else: s_bot = f"{n_score}점 ➖ 평상시"
+        if n_pct >= 99: s_bot = f"[투매강도: {n_raw:.1f}배] 🚨 항복 선언 (완전한 패닉){atm_str}"
+        elif n_pct >= 95: s_bot = f"[투매강도: {n_raw:.1f}배] 🩸 패닉 셀링 (악성 매물 투매){atm_str}"
+        elif n_pct >= 90: s_bot = f"[투매강도: {n_raw:.1f}배] 🟡 투매 발생 (손절 시작){atm_str}"
+        else: s_bot = f"[투매강도: {n_raw:.1f}배] ➖ 평상시 (매물 소화 중){atm_str}"
 
-        if l_score >= 500: l_bot = f"{l_score}점 🚨 역사적 극단치{bunker_str}"
-        elif l_score >= 300: l_bot = f"{l_score}점 🛡️ 강력 세력개입{bunker_str}"
-        elif l_score >= 100: l_bot = f"{l_score}점 🏗️ 일반 방어벽{bunker_str}"
-        else: l_bot = f"{l_score}점 ➖ 평상시{bunker_str}"
+        if l_pct >= 99: l_bot = f"[매집강도: {l_raw:.1f}배] 🚨 역사적 벙커{bunker_str}"
+        elif l_pct >= 95: l_bot = f"[매집강도: {l_raw:.1f}배] 🛡️ 강력 방어벽{bunker_str}"
+        elif l_pct >= 90: l_bot = f"[매집강도: {l_raw:.1f}배] 🏗️ 일반 방어벽{bunker_str}"
+        else: l_bot = f"[매집강도: {l_raw:.1f}배] ➖ 평상시 (방어벽 없음){bunker_str}"
 
         if trend_up:
             top_short_list.append(s_top); top_long_list.append(l_top); bot_short_list.append("-"); bot_long_list.append("-")
@@ -303,7 +361,7 @@ def apply_logic_c(df):
             top_short_list.append("-"); top_long_list.append("-"); bot_short_list.append(s_bot); bot_long_list.append(l_bot)
 
     df['[상승장] 단기(풋발작)'] = top_short_list; df['[상승장] 세력(롤업)'] = top_long_list
-    df['[하락장] 단기(콜투매)'] = bot_short_list; df['[하락장] 세력(벙커)'] = bot_long_list
+    df['[하락장] 단기(콜투매/ATM)'] = bot_short_list; df['[하락장] 세력(벙커)'] = bot_long_list
     df['Phase'] = phase_list
     return df
 
@@ -502,7 +560,7 @@ def run_quant_engine_web(version, mode, target_date=None, target_start=None, tar
     df['20MA'] = df['Close Price'].rolling(window=20, min_periods=1).mean()
 
     if version == "G버젼_하락추세조정": df = apply_logic_g_down(df)
-    elif version == "C버젼": df = apply_logic_c(df)
+    elif version == "C버젼_하락특화": df = apply_logic_c(df) # 엔진 라우터 수정 완료
     elif version == "G버젼_상승특화": df = apply_logic_g_up(df)
 
     if mode == "구간 조회" and target_start and target_end: out_df = df[(df['Date'] >= pd.to_datetime(target_start)) & (df['Date'] <= pd.to_datetime(target_end))].copy()
@@ -534,7 +592,8 @@ with st.sidebar:
     st.divider()
     
     st.header("⚙️ 퀀트 엔진 버젼 선택")
-    engine_version = st.radio("버전", ("G버젼_하락추세조정", "C버젼", "G버젼_상승특화"))
+    # 메뉴명 "C버젼_하락특화"로 통일 완료
+    engine_version = st.radio("버전", ("G버젼_하락추세조정", "C버젼_하락특화", "G버젼_상승특화")) 
     
     st.divider()
     
