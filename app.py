@@ -26,12 +26,24 @@ if 'analysis_history' not in st.session_state:
     st.session_state['analysis_history'] = []
 
 if 'quick_links' not in st.session_state:
-    # 기본값 세팅 (나중에 화면에서 편집 가능)
     st.session_state['quick_links'] = [
         {"name": "Google Finance", "url": "https://www.google.com/finance"},
         {"name": "CME FedWatch", "url": "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"},
         {"name": "TradingView", "url": "https://kr.tradingview.com/"}
     ]
+
+if 'edit_links_mode' not in st.session_state:
+    st.session_state['edit_links_mode'] = False
+
+def toggle_edit():
+    st.session_state['edit_links_mode'] = not st.session_state['edit_links_mode']
+
+def apply_links():
+    for i in range(3):
+        st.session_state['quick_links'][i]['name'] = st.session_state[f"edit_name_{i}"]
+        st.session_state['quick_links'][i]['url'] = st.session_state[f"edit_url_{i}"]
+    st.session_state['edit_links_mode'] = False
+    st.session_state['show_link_success'] = True
 
 def remove_history_item(index):
     st.session_state['analysis_history'].pop(index)
@@ -65,21 +77,40 @@ with col_header:
     st.markdown("**3-in-1 다중 전략 엔진 탑재 (Streamlit Web Version)**")
 
 with col_links:
-    st.write("🔗 **Quick Links**")
+    # 퀵링크 제목 및 톱니바퀴 편집 버튼
+    head_c1, head_c2 = st.columns([0.85, 0.15])
+    with head_c1:
+        st.write("🔗 **Quick Links**")
+    with head_c2:
+        st.button("⚙️", on_click=toggle_edit, key="link_edit_btn", help="링크 편집")
+        
+    # 현재 설정된 링크 버튼 출력 (분석엔진가동 Primary 버튼과 동일한 붉은 톤/작은 크기로 커스텀)
     link_cols = st.columns(3)
-    # 현재 설정된 링크 버튼 출력
     for i, link in enumerate(st.session_state['quick_links']):
         with link_cols[i]:
-            st.markdown(f"<a href='{link['url']}' target='_blank'><button style='width:100%; font-size:12px; padding:3px;'>{link['name']}</button></a>", unsafe_allow_html=True)
+            btn_html = f"""
+            <a href='{link['url']}' target='_blank' style='text-decoration:none;'>
+                <button style='width:100%; background-color:#FF4B4B; color:white; border:none; border-radius:4px; font-size:11px; padding:6px 2px; cursor:pointer; font-weight:bold; box-shadow: rgba(0, 0, 0, 0.1) 0px 1px 2px;'>
+                    {link['name']}
+                </button>
+            </a>
+            """
+            st.markdown(btn_html, unsafe_allow_html=True)
+            
+    # 적용 완료 알림 메시지 (한 번 보여주고 사라짐)
+    if st.session_state.get('show_link_success', False):
+        st.success("✅ 링크 변경 완료!")
+        st.session_state['show_link_success'] = False
     
-    # 링크 편집 토글창
-    with st.expander("✏️ 링크 주소 편집하기"):
-        for i in range(3):
-            c1, c2 = st.columns([0.4, 0.6])
-            st.session_state['quick_links'][i]['name'] = c1.text_input(f"버튼 {i+1} 이름", value=st.session_state['quick_links'][i]['name'], key=f"lname_{i}")
-            st.session_state['quick_links'][i]['url'] = c2.text_input(f"URL 주소", value=st.session_state['quick_links'][i]['url'], key=f"lurl_{i}")
-        if st.button("적용하기", use_container_width=True):
-            st.rerun()
+    # 링크 편집 화면 (버튼 클릭 시에만 등장)
+    if st.session_state['edit_links_mode']:
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.container():
+            for i in range(3):
+                c1, c2 = st.columns([0.4, 0.6])
+                c1.text_input(f"이름 {i+1}", value=st.session_state['quick_links'][i]['name'], key=f"edit_name_{i}")
+                c2.text_input(f"URL {i+1}", value=st.session_state['quick_links'][i]['url'], key=f"edit_url_{i}")
+            st.button("적용하기", type="primary", use_container_width=True, on_click=apply_links)
 
 st.divider()
 
@@ -756,19 +787,16 @@ if st.session_state['analysis_history']:
             st.session_state['analysis_history'] = []
             st.rerun()
 
-    # 리스트에 저장된 모든 결과를 반복해서 출력
     for i, record in enumerate(st.session_state['analysis_history']):
         with st.container():
             c1, c2, c3 = st.columns([0.7, 0.15, 0.15])
             with c1:
                 st.markdown(f"**{record['title']}**")
             with c2:
-                # 새 창(팝업) 띄우기용 HTML 링크 렌더링
                 new_window_html = generate_new_window_link(record['data'], record['title'])
                 st.markdown(new_window_html, unsafe_allow_html=True)
             with c3:
                 st.button("❌ 삭제", key=f"del_{record['id']}", on_click=remove_history_item, args=(i,), use_container_width=True)
             
-            # height 고정값 없이 전체 데이터를 시원하게 출력
             st.dataframe(record['data'], use_container_width=True, hide_index=True)
             st.write("")
