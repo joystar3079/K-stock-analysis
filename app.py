@@ -9,6 +9,7 @@ import os
 import warnings
 from github import Github
 import io
+import base64
 
 warnings.filterwarnings('ignore')
 pd.set_option('display.unicode.east_asian_width', True)
@@ -18,12 +19,69 @@ pd.set_option('display.unicode.east_asian_width', True)
 # =====================================================================
 st.set_page_config(page_title="EWY Quant Analytics V27", page_icon="📈", layout="wide")
 
-# 세션 상태(Session State)에 분석 히스토리 저장소 초기화
+# =====================================================================
+# [세션 상태 관리] 히스토리 및 우측 상단 퀵링크 초기화
+# =====================================================================
 if 'analysis_history' not in st.session_state:
     st.session_state['analysis_history'] = []
 
+if 'quick_links' not in st.session_state:
+    # 기본값 세팅 (나중에 화면에서 편집 가능)
+    st.session_state['quick_links'] = [
+        {"name": "Google Finance", "url": "https://www.google.com/finance"},
+        {"name": "CME FedWatch", "url": "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"},
+        {"name": "TradingView", "url": "https://kr.tradingview.com/"}
+    ]
+
 def remove_history_item(index):
     st.session_state['analysis_history'].pop(index)
+
+# 새 창 띄우기용 HTML/Base64 인코더 함수
+def generate_new_window_link(df, title):
+    html_content = df.to_html(index=False, justify='center')
+    html_template = f"""
+    <html><head><meta charset="utf-8"><title>{title}</title>
+    <style>
+        body {{ font-family: 'Malgun Gothic', sans-serif; padding: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; font-size: 13px; text-align: center; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+    </style></head><body>
+    <h2>{title}</h2>
+    {html_content}
+    </body></html>
+    """
+    b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8')
+    href = f'<a href="data:text/html;base64,{b64}" target="_blank" style="text-decoration: none; padding: 4px 10px; background-color: #0078FF; color: white; border-radius: 4px; font-size: 13px; font-weight: bold;">↗️ 새창 열기</a>'
+    return href
+
+# =====================================================================
+# [화면 상단 UI] 타이틀 및 퀵 링크 (편집 기능 포함)
+# =====================================================================
+col_header, col_links = st.columns([0.65, 0.35])
+
+with col_header:
+    st.title("📈 EWY Quant Analytics V27")
+    st.markdown("**3-in-1 다중 전략 엔진 탑재 (Streamlit Web Version)**")
+
+with col_links:
+    st.write("🔗 **Quick Links**")
+    link_cols = st.columns(3)
+    # 현재 설정된 링크 버튼 출력
+    for i, link in enumerate(st.session_state['quick_links']):
+        with link_cols[i]:
+            st.markdown(f"<a href='{link['url']}' target='_blank'><button style='width:100%; font-size:12px; padding:3px;'>{link['name']}</button></a>", unsafe_allow_html=True)
+    
+    # 링크 편집 토글창
+    with st.expander("✏️ 링크 주소 편집하기"):
+        for i in range(3):
+            c1, c2 = st.columns([0.4, 0.6])
+            st.session_state['quick_links'][i]['name'] = c1.text_input(f"버튼 {i+1} 이름", value=st.session_state['quick_links'][i]['name'], key=f"lname_{i}")
+            st.session_state['quick_links'][i]['url'] = c2.text_input(f"URL 주소", value=st.session_state['quick_links'][i]['url'], key=f"lurl_{i}")
+        if st.button("적용하기", use_container_width=True):
+            st.rerun()
+
+st.divider()
 
 # =====================================================================
 # [수학 엔진] 미국식 이항 모형 (IV) 및 B-S 모형 (Delta)
@@ -144,7 +202,7 @@ def extract_daily_options():
     return df_final, None
 
 # =====================================================================
-# [엔진 1~3] 기존 버젼 로직 통합
+# [엔진 1~3] 퀀트 로직
 # =====================================================================
 def apply_logic_g_down(df):
     bottom_flags, near_scores, long_scores, hybrid_scores = [], [], [], []
@@ -337,7 +395,7 @@ def apply_logic_c(df):
         l_pct = r['Bunker_Pct'] if pd.notna(r['Bunker_Pct']) else 0
         l_raw = r['Long_P_Ratio']
         atm_dom = r['ATM_Put_Dominance']
-
+        
         if atm_dom > 85.0: atm_level = "(MAX 🚨)"
         elif atm_dom >= 70.0: atm_level = "(위험 ⚠️)"
         elif atm_dom >= 55.0: atm_level = "(경계 🟡)"
@@ -580,11 +638,8 @@ def run_quant_engine_web(version, mode, target_date=None, target_start=None, tar
     return out_df
 
 # =====================================================================
-# [웹 UI] Streamlit 메인 화면 구성
+# [웹 UI] 사이드바 설정 영역
 # =====================================================================
-st.title("📈 EWY Quant Analytics V27")
-st.markdown("**3-in-1 다중 전략 엔진 탑재 (Streamlit Web Version)**")
-
 with st.sidebar:
     st.header("📥 데이터 관리")
     if st.button("Daily 옵션데이터 추출", use_container_width=True):
@@ -676,7 +731,6 @@ if run_button:
             if 'recent_extracted_data' in st.session_state:
                 st.info("💡 방금 추출한 최신 실시간 데이터가 결합되어 진단되었습니다.")
             
-            # 히스토리 추가를 위한 데이터 패키징
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             detail_txt = mode_selection
             if mode_selection == "타임머신 (특정일)": detail_txt += f" ({target_date})"
@@ -702,14 +756,19 @@ if st.session_state['analysis_history']:
             st.session_state['analysis_history'] = []
             st.rerun()
 
+    # 리스트에 저장된 모든 결과를 반복해서 출력
     for i, record in enumerate(st.session_state['analysis_history']):
         with st.container():
-            c1, c2 = st.columns([0.9, 0.1])
+            c1, c2, c3 = st.columns([0.7, 0.15, 0.15])
             with c1:
                 st.markdown(f"**{record['title']}**")
             with c2:
+                # 새 창(팝업) 띄우기용 HTML 링크 렌더링
+                new_window_html = generate_new_window_link(record['data'], record['title'])
+                st.markdown(new_window_html, unsafe_allow_html=True)
+            with c3:
                 st.button("❌ 삭제", key=f"del_{record['id']}", on_click=remove_history_item, args=(i,), use_container_width=True)
             
-            # height 고정값을 없애 데이터 양만큼 시원하게 풀스크린으로 출력되도록 수정
+            # height 고정값 없이 전체 데이터를 시원하게 출력
             st.dataframe(record['data'], use_container_width=True, hide_index=True)
-            st.write("") # 간격 띄우기
+            st.write("")
