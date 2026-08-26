@@ -28,40 +28,49 @@ st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V28",
                    page_icon="📈", layout="wide")
 
 # =====================================================================
-# [웹 UI 전용 CSS] 버튼 크기, 디자인 통일
+# [웹 UI 전용 CSS] 버튼 크기, 디자인 완벽 쌍둥이 통일
 # =====================================================================
 st.markdown("""
 <style>
-/* 1. 삭제버튼 (Secondary) 축소 및 디자인 통일 */
+/* 1. 삭제버튼 (Secondary) 크기/포맷 통일 */
 div[data-testid="column"] button[kind="secondary"] {
-    height: 28px !important;
-    min-height: 28px !important;
-    padding: 0px 8px !important;
-    border-radius: 4px !important;
+    width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    padding: 0px !important;
+    border-radius: 6px !important;
     border: 1px solid rgba(128, 128, 128, 0.4) !important;
     background-color: transparent !important;
+    color: var(--text-color) !important;
 }
 div[data-testid="column"] button[kind="secondary"] p {
-    font-size: 11px !important;
+    font-size: 13px !important;
     margin: 0px !important;
+    font-weight: 500 !important;
+}
+div[data-testid="column"] button[kind="secondary"]:hover {
+    border-color: #FF4B4B !important;
+    color: #FF4B4B !important;
 }
 
 /* 2. 새창열기 HTML 버튼을 삭제버튼과 100% 동일하게 맞춤 */
 .custom-new-window-btn {
     width: 100%;
-    height: 28px;
-    min-height: 28px;
-    padding: 0px 8px;
-    border-radius: 4px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0px;
+    border-radius: 6px;
     border: 1px solid rgba(128, 128, 128, 0.4);
     background-color: transparent;
-    color: inherit;
-    font-size: 11px;
+    color: var(--text-color);
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     box-sizing: border-box;
+    text-decoration: none;
 }
 .custom-new-window-btn:hover {
     border-color: #FF4B4B;
@@ -124,7 +133,7 @@ def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [
         r for r in st.session_state["analysis_history"] if r["id"] != item_id]
 
-# 크롬 차단을 우회하는 강력한 새 탭 띄우기 기술 (Blob 변환)
+# 팝업 차단을 완벽하게 우회하는 동기화(Synchronous) 새 탭 기술
 def generate_new_window_link(df, title):
     html_content = df.to_html(index=False, justify='center')
     html_template = f"""
@@ -140,12 +149,13 @@ def generate_new_window_link(df, title):
     {html_content}
     </body></html>
     """
+    # 줄바꿈 문자를 확실히 제거하여 자바스크립트 오류 방지
     b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8').replace('\n', '')
     
     btn_html = f"""
-    <button onclick="fetch('data:text/html;base64,{b64}').then(res=>res.blob()).then(blob=>{{window.open(URL.createObjectURL(blob), '_blank');}});" class="custom-new-window-btn">
+    <a href="javascript:void(0);" onclick="var w=window.open(); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">
         ↗️ 새창 열기
-    </button>
+    </a>
     """
     return btn_html
 
@@ -260,6 +270,22 @@ with st.sidebar:
         else:
             st.session_state["recent_extracted_data"] = df_ext
             st.session_state["extract_stats"] = stats
+            
+    # 마스터 데이터 가장 최근 일자 다운로드 기능 추가
+    master_info_sb = load_master_data(st.session_state["master_version"])
+    if not master_info_sb.empty:
+        latest_date_sb = master_info_sb['Quote Date'].max()
+        latest_date_str_sb = pd.to_datetime(latest_date_sb).strftime('%Y-%m-%d')
+        latest_df_sb = master_info_sb[master_info_sb['Quote Date'] == latest_date_sb]
+        csv_sb = latest_df_sb.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+        
+        st.download_button(
+            label=f"📥 {latest_date_str_sb} 마스터(최근) 다운로드",
+            data=csv_sb,
+            file_name=f"{SYMBOL}_Master_Latest_{pd.to_datetime(latest_date_sb).strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
     st.divider()
     st.markdown("#### ⎈ 퀀트 엔진 버젼 선택")
@@ -355,24 +381,18 @@ if run_button:
         st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
 # =====================================================================
-# [결과 화면 3] 분석 결과 비교 히스토리 화면 (오른쪽 정렬 완벽 복원)
+# [결과 화면 3] 분석 결과 비교 히스토리 화면 (오른쪽 정렬 완벽 쌍둥이 통일)
 # =====================================================================
 if st.session_state["analysis_history"]:
     st.divider()
-    c_title, c_clear = st.columns([0.85, 0.15])
-    with c_title:
-        st.header(f"📊 분석 결과 비교 히스토리 (최근 {MAX_HISTORY}건)")
-    with c_clear:
-        if st.button("🗑️ 전체 삭제", use_container_width=True):
-            st.session_state["analysis_history"] = []
-            st.rerun()
+    st.header(f"📊 분석 결과 비교 히스토리 (최근 {MAX_HISTORY}건)")
 
     for record in st.session_state["analysis_history"]:
         with st.container():
             st.markdown(f"**{record['title']}**")
             
-            # [새창 열기]와 [삭제] 버튼을 오른쪽 끝에 나란히 배치 [8 : 1 : 1 비율]
-            _, btn_col1, btn_col2 = st.columns([8, 1, 1])
+            # [새창 열기]와 [삭제] 버튼을 오른쪽 끝에 나란히 배치 [7.6 : 1.2 : 1.2 비율]
+            _, btn_col1, btn_col2 = st.columns([7.6, 1.2, 1.2])
             with btn_col1:
                 new_window_html = generate_new_window_link(record['data'], record['title'])
                 st.markdown(new_window_html, unsafe_allow_html=True)
