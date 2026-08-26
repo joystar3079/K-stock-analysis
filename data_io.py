@@ -1,15 +1,23 @@
 """데이터 입출력 — 시세, 마스터 파일, 일일 옵션 추출.
 
-기존 구조는 GitHub에 쓰고 로컬 파일에서 읽었습니다. Streamlit Cloud에서
-로컬 파일은 배포 시점 스냅샷이라 업로드해도 재배포 전까지 반영되지 않았고,
-캐시를 비워도 같은 옛 데이터를 다시 읽었습니다. 여기서는 읽기/쓰기를
-모두 GitHub 기준으로 통일하고, 로컬 파일은 폴백으로만 씁니다.
+[V29 수정] 같은 Quote Date 에 대해 두 스냅샷이 뒤섞이던 문제를 막습니다.
+
+기존 merge_master 는 (Quote Date, Expiration Date, Option Type, Strike) 키가
+겹치는 행만 교체했습니다. 라이브 옵션 체인은 과거 기록과 만기 구성·행사가
+범위가 다르고 당일 미결제약정이 아직 0인 경우가 많아서, 이미 존재하는 날짜를
+재추출하면 옛 행과 새 행이 뒤섞인 '혼종'이 만들어졌습니다. 그 날짜의 OI 집계
+지표가 통째로 왜곡되고, 세션에 추출 데이터가 남아 있는 한 모든 분석에 계속
+반영되었습니다.
+
+이제 병합은 항상 '날짜 단위'로 처리합니다.
+  skip    : 이미 있는 날짜는 건너뜁니다 (기본 — 기록 보존)
+  replace : 해당 날짜의 기존 행을 전부 지우고 새 스냅샷으로 통째 교체
+어느 쪽이든 한 날짜 안에 두 스냅샷이 섞이는 일은 발생하지 않습니다.
 """
 from __future__ import annotations
 
 import io
 import os
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -73,17 +81,68 @@ def load_master_data(cache_bust: str = "") -> pd.DataFrame:
 
 
 def normalize_option_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """마스터 병합용 표준 형태로 변환."""
+    """마스터 병합용 표준 형태로 변환. Quote Date 는 자정으로 정규화합니다."""
     out = df.copy()
-    out["Quote Date"] = pd.to_datetime(out["Quote Date"])
-    out["Expiration Date"] = pd.to_datetime(out["Expiration Date"])
+    out["Quote Date"] = pd.to_datetime(out["Quote Date"]).dt.normalize()
+    out["Expiration Date"] = pd.to_datetime(out["Expiration Date"]).dt.normalize()
     out["Option Type"] = np.where(
         out["Option Type"].astype(str).str.upper().str.startswith("C"), "C", "P")
     return out
 
 
-def merge_master(current: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
-    merged = pd.concat([current, normalize_option_frame(new)], ignore_index=True)
+def quote_dates(df: pd.DataFrame) -> set[pd.Timestamp]:
+    if df.empty or "Quote Date" not in df.columns:
+        return set()
+    return set(pd.to_datetime(df["Quote Date"]).dt.normalize().unique())
+
+
+def merge_report(current: pd.DataFrame, new: pd.DataFrame) -> dict:
+    """병합 전에 무엇이 벌어질지 미리 보여줍니다. 부작용 없음."""
+    cur_d, new_d = quote_dates(current), quote_dates(new)
+    dup = sorted(new_d & cur_d)
+    add = sorted(new_d - cur_d)
+    return {
+        "new_dates": [d.date() for d in add],
+        "conflict_dates": [d.date() for d in dup],
+        "master_rows": len(current),
+        "new_rows": len(new),
+        "conflict_rows_in_master": (
+            int(current["Quote Date"].isin(dup).sum()) if dup and not current.empty else 0),
+    }
+
+
+def merge_master(current: pd.DataFrame, new: pd.DataFrame,
+                 on_conflict: str = "skip") -> pd.DataFrame:
+    """날짜 단위 병합.
+
+    on_conflict
+      "skip"    : 마스터에 이미 있는 Quote Date 는 신규분을 버립니다 (기본)
+      "replace" : 해당 날짜의 마스터 행을 전부 제거하고 신규분으로 대체합니다
+
+    두 경우 모두 한 날짜 안에서 옛 스냅샷과 새 스냅샷이 섞이지 않습니다.
+    """
+    if on_conflict not in ("skip", "replace"):
+        raise ValueError(f"on_conflict 는 'skip' 또는 'replace' — 받은 값: {on_conflict}")
+
+    new_n = normalize_option_frame(new)
+    if current is None or current.empty:
+        return new_n.sort_values("Quote Date").reset_index(drop=True)
+
+    cur = current.copy()
+    cur["Quote Date"] = pd.to_datetime(cur["Quote Date"]).dt.normalize()
+
+    dup = quote_dates(new_n) & quote_dates(cur)
+    if dup:
+        if on_conflict == "skip":
+            new_n = new_n[~new_n["Quote Date"].isin(dup)]
+        else:
+            cur = cur[~cur["Quote Date"].isin(dup)]
+
+    if new_n.empty:
+        return cur.sort_values("Quote Date").reset_index(drop=True)
+
+    merged = pd.concat([cur, new_n], ignore_index=True)
+    # 같은 날짜 안에서는 이제 한 출처만 존재하므로, 이 단계는 순수 안전장치입니다
     return (merged.drop_duplicates(subset=MASTER_KEYS, keep="last")
                   .sort_values("Quote Date").reset_index(drop=True))
 
@@ -123,11 +182,13 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
 
     ticker = yf.Ticker(SYMBOL)
     try:
-        hist = ticker.history(period="1d")
+        hist = ticker.history(period="5d")
         etf_price = round(float(hist["Close"].iloc[-1]), 2)
         quote_date = hist.index[-1].date()
     except Exception as e:
         return None, f"주가 데이터를 불러올 수 없습니다: {e}", stats
+
+    stats["quote_date"] = quote_date
 
     try:
         expirations = ticker.options
@@ -167,7 +228,7 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
         pd.to_datetime(df["Expiration Date"]).values.astype("datetime64[D]"))
     df["T"] = np.maximum(bus, TH.MIN_T_DAYS) / TH.TRADING_DAYS
 
-    # ── 유동성 필터: 호가도 미결제도 없는 종목은 IV를 구할 이유가 없습니다 ──
+    # 유동성 필터 — 호가도 미결제도 없는 종목은 IV를 구할 이유가 없습니다
     mid = (df["Bid"] + df["Ask"]) / 2.0
     has_quote = (df["Bid"] > 0) & (df["Ask"] > 0)
     target = np.where(has_quote, mid, df["Last Price"])
@@ -175,6 +236,7 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
 
     stats["total_rows"] = len(df)
     stats["priced_rows"] = int(liquid.sum())
+    stats["zero_oi_rows"] = int((df["Open Interest"] <= 0).sum())
 
     iv = np.full(len(df), np.nan)
     delta = np.full(len(df), np.nan)
@@ -191,7 +253,6 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
             df[PRICE_COL].to_numpy()[idx], df["Strike"].to_numpy()[idx],
             df["T"].to_numpy()[idx], r, DIVIDEND_YIELD, iv_sub, is_call)
 
-    # NaN 유지 — 빈 문자열을 섞으면 dtype이 object가 되어 이후 연산이 막힙니다
     df["Implied Volatility"] = np.round(iv, 4)
     df["Delta"] = np.round(delta, 4)
 
@@ -203,3 +264,38 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
     final["Volume"] = final["Volume"].astype(int)
     final["Open Interest"] = final["Open Interest"].astype(int)
     return final, None, stats
+
+
+# ─── 진단 ────────────────────────────────────────────────────────────
+def diagnose_quote_date(master: pd.DataFrame, extracted: pd.DataFrame | None,
+                        target) -> pd.DataFrame:
+    """특정 날짜가 마스터/추출본에서 어떻게 구성되는지 비교합니다."""
+    t = pd.to_datetime(target).normalize()
+    rows = []
+
+    def summarize(df, label):
+        if df is None or df.empty:
+            rows.append({"출처": label, "행수": 0, "만기수": 0,
+                         "OI합": 0, "OI=0 비율": "-", "행사가 범위": "-"})
+            return
+        d = normalize_option_frame(df)
+        d = d[d["Quote Date"] == t]
+        if d.empty:
+            rows.append({"출처": label, "행수": 0, "만기수": 0,
+                         "OI합": 0, "OI=0 비율": "-", "행사가 범위": "-"})
+            return
+        rows.append({
+            "출처": label,
+            "행수": len(d),
+            "만기수": d["Expiration Date"].nunique(),
+            "OI합": int(d["Open Interest"].sum()),
+            "OI=0 비율": f"{(d['Open Interest'] <= 0).mean():.0%}",
+            "행사가 범위": f"{d['Strike'].min():.0f}~{d['Strike'].max():.0f}",
+        })
+
+    summarize(master, "마스터")
+    summarize(extracted, "신규 추출")
+    if extracted is not None and not extracted.empty:
+        summarize(merge_master(master, extracted, "skip"), "병합(skip)")
+        summarize(merge_master(master, extracted, "replace"), "병합(replace)")
+    return pd.DataFrame(rows)
