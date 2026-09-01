@@ -1,16 +1,17 @@
 """데이터 입출력 — 파일 업로드 전용 모듈 (API 자동 수집 폐기)
 
-[V34 경량화] 
-  1) 야후 파이낸스 옵션 API 수집 경로(extract_daily_options) 완전 삭제
-  2) 로컬/코랩에서 생성한 분석데이터 CSV 파일 업로드 전용으로 최적화
-  3) [오류 수정] 시세 조회(fetch_etf_history)를 차단에 취약한 yf.download 대신
-     가장 안정적인 자체 우회 모듈인 yf.Ticker().history() 방식으로 교체
+[V34 경량화 최종본] 
+  1) 야후 파이낸스 옵션 API 수집 경로 완전 삭제 (로컬 CSV 업로드 전용)
+  2) [오류 수정] 429 Too Many Requests (트래픽 초과) 방어 로직 추가
+     - 옵션 크롤링이 빠졌으므로, 시세(history) 조회 전용 브라우저 위장 세션 재투입
+     - 차단 시 지연 재시도(Exponential Backoff) 알고리즘 탑재
 """
 from __future__ import annotations
 
 import io
 import os
 import re
+import time
 from typing import Any
 
 import numpy as np
@@ -24,7 +25,7 @@ from config import (DEFAULT_SOFR, DIVIDEND_YIELD, MASTER_FILE, PRICE_COL,
 from pricing import bs_delta_batch, solve_iv_batch
 
 MASTER_KEYS = ["Quote Date", "Expiration Date", "Option Type", "Strike"]
-IO_VERSION = "V34_File_Only_Fixed"
+IO_VERSION = "V34_File_Only_Final"
 
 FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Strike", "Bid", "Ask", "Last Price", "Volume", "Open Interest",
@@ -32,7 +33,7 @@ FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Implied Volatility", "Delta"]
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
 # ═══════════════════════════════════════════════════════════════════
 # 0. 컬럼명 정규화
@@ -287,7 +288,7 @@ def extract_options_from_file(src, *, filename: str | None = None) -> tuple[pd.D
     return final, None, stats
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. 기초자산 시세 수집 (MA 연산용 / 야후 순정 객체 사용)
+# 4. 기초자산 시세 수집 (MA 연산용 / 429 방어 로직 적용)
 # ═══════════════════════════════════════════════════════════════════
 def _stooq_history(symbol: str) -> pd.DataFrame:
     tick = symbol.lower()
@@ -302,24 +303,46 @@ def _stooq_history(symbol: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_etf_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """야후 → stooq 폴백 시세 수집.
+    옵션 조회가 빠졌으므로, 429(Too Many Requests) 트래픽 차단을 뚫기 위해 
+    강력한 브라우저 위장 세션을 시세 전용으로 다시 투입합니다.
+    """
     empty = pd.DataFrame(columns=["Date", "Close Price"])
-    try:
-        # 💡 [핵심 수정] yf.download() 대신 야후 차단 방어력이 훨씬 뛰어난 yf.Ticker().history() 방식으로 원복
-        tk = yf.Ticker(symbol)
-        px = tk.history(start=start_date, end=end_date).reset_index()
-        
-        if not px.empty:
-            # 인덱스 이름이 Datetime으로 나올 수 있으므로 Date로 통일
-            if "Datetime" in px.columns:
-                px = px.rename(columns={"Datetime": "Date"})
+    last_err = ""
+    
+    # 💡 [핵심 방어막] 시세 조회 전용 위장 세션 구축 (429 차단 우회)
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": _UA,
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, br"
+    })
+
+    # 지연 재시도 (Exponential Backoff)
+    for attempt in range(3):
+        try:
+            tk = yf.Ticker(symbol, session=s)
+            px = tk.history(start=start_date, end=end_date).reset_index()
+            
+            if not px.empty:
+                if "Datetime" in px.columns:
+                    px = px.rename(columns={"Datetime": "Date"})
+                    
+                if "Close" in px.columns:
+                    px = px.rename(columns={"Close": "Close Price"})
+                    px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
+                    return px.sort_values("Date").dropna(subset=["Close Price"]).reset_index(drop=True)[["Date", "Close Price"]]
+                    
+        except Exception as e:
+            last_err = str(e)
+            # 429 에러(트래픽 초과) 발생 시 약간 대기 후 재시도
+            if "429" in last_err or "Too Many Requests" in last_err:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            else:
+                break # 다른 형태의 오류면 즉시 루프 탈출
                 
-            if "Close" in px.columns:
-                px = px.rename(columns={"Close": "Close Price"})
-                # Timezone 제거 후 Date로 통일
-                px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
-                return px.sort_values("Date").dropna(subset=["Close Price"]).reset_index(drop=True)[["Date", "Close Price"]]
-    except Exception as e:
-        st.info(f"야후 시세 실패 — stooq 폴백 시도 ({str(e)[:60]})")
+    st.info(f"야후 시세 실패 — stooq 폴백 시도 ({last_err[:60]})")
 
     try:
         px = _stooq_history(symbol)
