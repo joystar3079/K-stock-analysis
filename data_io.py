@@ -455,18 +455,22 @@ def extract_options_from_file(
 # ═══════════════════════════════════════════════════════════════════
 def _make_sessions() -> list:
     """yfinance 버전별로 먹히는 세션 후보를 순서대로 만듭니다.
-
-    yfinance 0.2.5x 이후는 curl_cffi 세션을 요구하며, requests.Session 을 넣으면
-    바로 예외가 납니다. 그래서 curl_cffi → requests → 세션없음 순으로 시도합니다.
+    최신 야후 서버의 봇 차단을 뚫기 위해 헤더를 더욱 강력하게 위장합니다.
     """
     sessions: list = []
     try:
         from curl_cffi import requests as cffi
         sessions.append(cffi.Session(impersonate="chrome"))
-    except Exception:
+    except ImportError:
         pass
+
     s = requests.Session()
-    s.headers.update({"User-Agent": _UA, "Accept": "*/*"})
+    # 💡 [핵심 수정] 야후가 봇으로 인식하지 못하도록 브라우저 User-Agent 및 Accept 헤더 강화
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br"
+    })
     sessions.append(s)
     sessions.append(None)
     return sessions
@@ -508,18 +512,32 @@ def fetch_etf_history(symbol: str, start_date: str, end_date: str) -> pd.DataFra
     """야후 → stooq 폴백. 둘 다 실패해도 예외 대신 빈 프레임을 돌려줍니다."""
     empty = pd.DataFrame(columns=["Date", "Close Price"])
 
-    try:
-        px = yf.download(symbol, start=start_date, end=end_date,
-                         progress=False, auto_adjust=False).reset_index()
-        if not px.empty:
-            if isinstance(px.columns, pd.MultiIndex):
-                px.columns = [c[0] for c in px.columns]
-            px = px.rename(columns={"Close": "Close Price"})
-            px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
-            return (px.sort_values("Date").dropna(subset=["Close Price"])
-                      .reset_index(drop=True)[["Date", "Close Price"]])
-    except Exception as e:
-        st.info(f"야후 시세 실패 — stooq 폴백 시도 ({str(e)[:60]})")
+    last_err = None
+    # 💡 [핵심 수정] 시세 다운로드 시에도 차단 우회 세션(_make_sessions)을 순서대로 투입
+    for sess in _make_sessions():
+        try:
+            kw = {"start": start_date, "end": end_date, "progress": False}
+            if sess is not None:
+                kw["session"] = sess
+            
+            # 최신 yfinance에서 충돌을 일으키는 auto_adjust=False 파라미터 삭제
+            px = yf.download(symbol, **kw).reset_index()
+            
+            if not px.empty:
+                # yfinance >= 0.2.40 의 MultiIndex 컬럼 오류 완벽 방어
+                if isinstance(px.columns, pd.MultiIndex):
+                    px.columns = [c[0] if isinstance(c, tuple) else c for c in px.columns]
+                
+                if "Close" in px.columns:
+                    px = px.rename(columns={"Close": "Close Price"})
+                    px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
+                    return (px.sort_values("Date").dropna(subset=["Close Price"])
+                              .reset_index(drop=True)[["Date", "Close Price"]])
+        except Exception as e:
+            last_err = e
+            continue
+
+    st.info(f"야후 시세 실패 — stooq 폴백 시도 ({str(last_err)[:60]})")
 
     try:
         px = _stooq_history(symbol)
