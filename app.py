@@ -1,8 +1,9 @@
-"""EWY Quant Analytics V30 — Streamlit UI.
+"""EWY Quant Analytics V34 — Streamlit UI.
 
-[V34 파일 업로드 전용 경량화 버전] 
-  · 야후 API 옵션 수집, 수동 보정, 시세 파일 업로드 기능을 모두 제거.
+[V34 파일 업로드 전용 경량화 & 100% API 독립 버전] 
+  · 야후 API 옵션 수집, 수동 보정, 시세 파일 업로드 기능 전면 제거.
   · 코랩 등에서 추출된 완성형 CSV/Excel 파일을 업로드하는 방식으로 통일.
+  · [혁신] 시세 데이터마저 야후/stooq에 의존하지 않고 마스터 파일 내장 주가를 자체 추출하여 사용 (차단 100% 면역)
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from config import (DEFAULT_SOFR, DISPLAY_COLS, ENGINES, MASTER_FILE,
 from data_io import (DOWNLOAD_FOLDER, auto_update_master, build_filename,
                      extract_options_from_files, latest_data_date, load_master_data,
                      merge_master, merge_report, push_master_to_github, to_csv_bytes,
-                     to_zip_bytes, fetch_etf_history, diagnose_quote_date, IO_VERSION)
+                     to_zip_bytes, diagnose_quote_date, IO_VERSION)
 from features import aggregate_oi_features, attach_price
 from phases import assign_phases
 from presenters import add_display_columns
@@ -143,11 +144,19 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
 
     if master_df.empty: return pd.DataFrame(), meta
 
-    end_date = (datetime.today() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-    px = fetch_etf_history(SYMBOL, PRICE_HISTORY_START, end_date)
-    meta["price_source"] = "야후/stooq"
+    # 💡 [핵심 혁신] 외부 API(야후/stooq) 통신 완전 폐기! 
+    # 마스터 파일 내부의 'Quote Date'와 'EWY Price'를 추출하여 자체 시세표(px) 생성
+    if "EWY Price" in master_df.columns:
+        px = master_df[["Quote Date", "EWY Price"]].drop_duplicates(subset=["Quote Date"]).copy()
+        px.rename(columns={"Quote Date": "Date", "EWY Price": "Close Price"}, inplace=True)
+        px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
+        px = px.sort_values("Date").dropna(subset=["Close Price"]).reset_index(drop=True)
+        meta["price_source"] = "마스터 파일 내장 시세 (API 독립 / 완전 오프라인 모드)"
+    else:
+        meta["price_error"] = True
+        return pd.DataFrame(), meta
 
-    if px is None or px.empty:
+    if px.empty:
         meta["price_error"] = True
         return pd.DataFrame(), meta
 
@@ -198,8 +207,8 @@ def run_quant_engine(version: str, mode: str, target_date=None, target_start=Non
 # =====================================================================
 col_header, col_links = st.columns([0.65, 0.35])
 with col_header:
-    st.title(f"📈 {SYMBOL} Quant Analytics V30")
-    st.markdown("**3-in-1 다중 전략 엔진 · 벡터화 연산 엔진 탑재**")
+    st.title(f"📈 {SYMBOL} Quant Analytics V34")
+    st.markdown("**3-in-1 다중 전략 엔진 · 100% 완전 오프라인 모드 탑재**")
 
 with col_links:
     h1, h2 = st.columns([0.85, 0.15])
@@ -373,7 +382,7 @@ if run_button:
     with st.spinner(f"[{engine_version}] 연산 중..."):
         result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
     if result_df.empty:
-        if meta.get("price_error"): st.error("❌ 시세를 가져오지 못했습니다 (야후 API 일시 오류).")
+        if meta.get("price_error"): st.error("❌ 기초자산 시세(EWY Price) 정보를 찾지 못했습니다. 마스터 파일 데이터를 확인하세요.")
         else: st.error("❌ 조회 결과가 없습니다. 마스터 데이터를 확인하세요.")
     else:
         anchor = meta.get("anchor_date")
@@ -381,6 +390,9 @@ if run_button:
         st.success(f"✅ 연산 완료 ({mode_selection}) · **기준일 {anchor_str}** · 누적 {meta.get('n_dates', 0)}일")
         if meta.get("merged_extraction"):
             st.info(f"💡 연산 전 방금 올린 데이터가 결합되었습니다.")
+            
+        if meta.get("price_source"):
+            st.caption(f"시세 출처: {meta['price_source']}")
 
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         detail = mode_selection
