@@ -31,7 +31,7 @@ from pricing import bs_delta_batch, solve_iv_batch
 MASTER_KEYS = ["Quote Date", "Expiration Date", "Option Type", "Strike"]
 
 # app.py 가 구버전 data_io.py 배포를 감지하는 데 쓰는 표식입니다.
-IO_VERSION = "V30"
+IO_VERSION = "V31"
 
 FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Strike", "Bid", "Ask", "Last Price", "Volume", "Open Interest",
@@ -771,7 +771,125 @@ def extract_daily_options(retries: int = 2) -> tuple[pd.DataFrame | None, str | 
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 9. 진단
+# 10. 다운로드 · 로컬 저장 · 다중 병합
+# ═══════════════════════════════════════════════════════════════════
+DOWNLOAD_FOLDER = "EWY Option"
+
+
+def latest_data_date(*frames) -> pd.Timestamp | None:
+    """넘긴 프레임들 중 가장 마지막 Quote Date.
+
+    오늘 날짜가 아니라 '데이터의 최종 일자'입니다. 장 마감 전 조회나 휴장일
+    조회에서 파일명이 실제 데이터와 어긋나지 않게 하려는 목적입니다.
+    """
+    dates = []
+    for df in frames:
+        if df is None or getattr(df, "empty", True):
+            continue
+        if "Quote Date" not in df.columns:
+            continue
+        s = pd.to_datetime(df["Quote Date"], errors="coerce").dropna()
+        if not s.empty:
+            dates.append(s.max())
+    return max(dates) if dates else None
+
+
+def build_filename(data_date=None, kind: str = "분석데이터", ext: str = "csv",
+                   symbol: str = SYMBOL) -> str:
+    """'EWY Option 분석데이터_20260831.csv' 형태의 파일명을 만듭니다."""
+    d = pd.to_datetime(data_date, errors="coerce") if data_date is not None else None
+    stamp = d.strftime("%Y%m%d") if d is not None and pd.notna(d) else "날짜미상"
+    return f"{symbol} Option {kind}_{stamp}.{ext}"
+
+
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    """엑셀에서 한글이 깨지지 않도록 BOM 을 붙인 UTF-8 바이트."""
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def to_zip_bytes(files: dict[str, bytes], folder: str = DOWNLOAD_FOLDER) -> bytes:
+    """폴더 구조를 가진 zip 을 만듭니다.
+
+    브라우저는 보안상 다운로드 경로를 지정할 수 없어서, 'EWY Option' 폴더로
+    받으려면 폴더를 품은 zip 을 내려주는 방법밖에 없습니다. 압축을 풀면
+    'EWY Option/파일명.csv' 로 생성됩니다.
+    """
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in files.items():
+            z.writestr(f"{folder}/{name}", data)
+    return buf.getvalue()
+
+
+def save_to_local_folder(data: bytes, filename: str,
+                         folder: str = DOWNLOAD_FOLDER,
+                         base_dir: str | None = None) -> str:
+    """실행 중인 머신의 <base_dir>/<folder>/ 에 직접 저장하고 경로를 돌려줍니다.
+
+    로컬에서 streamlit 을 돌릴 때만 의미가 있습니다. Streamlit Cloud 에서는
+    서버 컨테이너에 쓰이므로 PC 에는 남지 않습니다.
+    """
+    root = os.path.expanduser(base_dir) if base_dir else os.getcwd()
+    target = os.path.join(root, folder)
+    os.makedirs(target, exist_ok=True)
+    path = os.path.join(target, filename)
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def merge_many(current: pd.DataFrame, frames: list[pd.DataFrame],
+               on_conflict: str = "skip") -> tuple[pd.DataFrame, list[dict]]:
+    """여러 추출본을 순서대로 누적 병합합니다. 각 단계의 리포트도 함께 반환."""
+    merged = (current.copy() if current is not None and not current.empty
+              else pd.DataFrame())
+    reports: list[dict] = []
+    for i, new in enumerate(frames):
+        if new is None or new.empty:
+            continue
+        rep = merge_report(merged, new)
+        rep["step"] = i + 1
+        merged = merge_master(merged, new, on_conflict=on_conflict)
+        rep["rows_after"] = len(merged)
+        reports.append(rep)
+    return merged, reports
+
+
+def extract_options_from_files(
+    files, *, on_conflict: str = "skip", **kwargs,
+) -> tuple[pd.DataFrame | None, list[dict]]:
+    """여러 파일을 한 번에 변환하고 하나로 누적 병합합니다.
+
+    반환: (병합된 데이터 또는 None, 파일별 결과 목록)
+    """
+    frames, results = [], []
+    for f in files:
+        name = getattr(f, "name", str(f))
+        df, err, stats = extract_options_from_file(f, filename=name, **kwargs)
+        results.append({
+            "filename": name,
+            "rows": 0 if df is None else len(df),
+            "quote_date": stats.get("quote_date"),
+            "priced_rows": stats.get("priced_rows", 0),
+            "error": err,
+            "stats": stats,
+        })
+        if df is not None and not df.empty:
+            frames.append(df)
+
+    if not frames:
+        return None, results
+
+    combined, reports = merge_many(pd.DataFrame(), frames, on_conflict=on_conflict)
+    for r, rep in zip([x for x in results if not x["error"]], reports):
+        r["merge"] = rep
+    return combined, results
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 11. 진단
 # ═══════════════════════════════════════════════════════════════════
 def diagnose_quote_date(master: pd.DataFrame, extracted: pd.DataFrame | None,
                         target) -> pd.DataFrame:
