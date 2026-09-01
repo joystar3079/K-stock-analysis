@@ -6,8 +6,7 @@
          → 야후가 죽어도 IV/Delta 산출까지 100% 동일하게 동작합니다.
       2) CBOE 와이드 포맷(한 행에 콜/풋 동시), 롱 포맷, 컬럼명 변형을 자동 인식.
       3) 시세도 야후 실패 시 stooq → 업로드 파일 → 수동입력 순으로 폴백.
-      4) yfinance 신버전(0.2.5x+)에 requests.Session 을 주입하면 터지던 버그 수정.
-         (신버전은 curl_cffi 세션을 요구합니다. requests.Session 주입은 예외를 냅니다.)
+      4) [수정완료] 가짜 세션 주입 로직 전면 삭제 -> yfinance 라이브러리 순정 자체 크럼브(Crumb) 우회 기능 활용.
       5) Option Type 을 'C'/'P' 로 넣든 'Call'/'Put' 으로 넣든 IV 계산이 동일하게 동작.
 """
 from __future__ import annotations
@@ -31,7 +30,7 @@ from pricing import bs_delta_batch, solve_iv_batch
 MASTER_KEYS = ["Quote Date", "Expiration Date", "Option Type", "Strike"]
 
 # app.py 가 구버전 data_io.py 배포를 감지하는 데 쓰는 표식입니다.
-IO_VERSION = "V32"
+IO_VERSION = "V33_Native_YF"
 
 FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Strike", "Bid", "Ask", "Last Price", "Volume", "Open Interest",
@@ -273,7 +272,7 @@ def _to_num(s: pd.Series) -> pd.Series:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. IV / Delta 산출 — 야후 경로와 파일 경로가 공유하는 핵심 로직
+# 4. IV / Delta 산출
 # ═══════════════════════════════════════════════════════════════════
 def enrich_option_frame(df: pd.DataFrame, etf_price: float, quote_date,
                         sofr: float, stats: dict | None = None,
@@ -453,41 +452,15 @@ def extract_options_from_file(
 # ═══════════════════════════════════════════════════════════════════
 # 6. 시세 — 야후 → stooq → 파일 → 수동
 # ═══════════════════════════════════════════════════════════════════
-def _make_sessions() -> list:
-    """yfinance 버전별로 먹히는 세션 후보를 순서대로 만듭니다.
-    최신 야후 서버의 봇 차단을 뚫기 위해 헤더를 더욱 강력하게 위장합니다.
-    """
-    sessions: list = []
-    try:
-        from curl_cffi import requests as cffi
-        sessions.append(cffi.Session(impersonate="chrome"))
-    except ImportError:
-        pass
-
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br"
-    })
-    sessions.append(s)
-    sessions.append(None)
-    return sessions
-
-
 def _yahoo_history(symbol: str, **kw) -> pd.DataFrame:
-    last_err = None
-    for sess in _make_sessions():
-        try:
-            tk = yf.Ticker(symbol, session=sess) if sess is not None else yf.Ticker(symbol)
-            hist = tk.history(**kw)
-            if hist is not None and not hist.empty:
-                return hist
-        except Exception as e:
-            last_err = e
-            continue
-    if last_err:
-        raise last_err
+    """순수 Native yfinance History 연동"""
+    try:
+        tk = yf.Ticker(symbol)
+        hist = tk.history(**kw)
+        if hist is not None and not hist.empty:
+            return hist
+    except Exception as e:
+        raise e
     return pd.DataFrame()
 
 
@@ -508,32 +481,27 @@ def _stooq_history(symbol: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_etf_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """야후 → stooq 폴백. 둘 다 실패해도 예외 대신 빈 프레임을 돌려줍니다."""
+    """야후 → stooq 폴백. 둘 다 실패해도 예외 대신 빈 프레임을 돌려줍니다.
+    세션 조작을 지우고 yfinance의 순정 통신을 사용합니다.
+    """
     empty = pd.DataFrame(columns=["Date", "Close Price"])
 
-    last_err = None
-    for sess in _make_sessions():
-        try:
-            kw = {"start": start_date, "end": end_date, "progress": False}
-            if sess is not None:
-                kw["session"] = sess
+    try:
+        kw = {"start": start_date, "end": end_date, "progress": False}
+        px = yf.download(symbol, **kw).reset_index()
+        
+        if not px.empty:
+            # MultiIndex 방어
+            if isinstance(px.columns, pd.MultiIndex):
+                px.columns = [c[0] if isinstance(c, tuple) else c for c in px.columns]
             
-            px = yf.download(symbol, **kw).reset_index()
-            
-            if not px.empty:
-                if isinstance(px.columns, pd.MultiIndex):
-                    px.columns = [c[0] if isinstance(c, tuple) else c for c in px.columns]
-                
-                if "Close" in px.columns:
-                    px = px.rename(columns={"Close": "Close Price"})
-                    px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
-                    return (px.sort_values("Date").dropna(subset=["Close Price"])
-                              .reset_index(drop=True)[["Date", "Close Price"]])
-        except Exception as e:
-            last_err = e
-            continue
-
-    st.info(f"야후 시세 실패 — stooq 폴백 시도 ({str(last_err)[:60]})")
+            if "Close" in px.columns:
+                px = px.rename(columns={"Close": "Close Price"})
+                px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
+                return (px.sort_values("Date").dropna(subset=["Close Price"])
+                          .reset_index(drop=True)[["Date", "Close Price"]])
+    except Exception as e:
+        st.info(f"야후 시세 실패 — stooq 폴백 시도 ({str(e)[:60]})")
 
     try:
         px = _stooq_history(symbol)
@@ -756,41 +724,35 @@ def extract_daily_options(retries: int = 2) -> tuple[pd.DataFrame | None, str | 
     sofr = _fetch_sofr()
     stats["sofr"] = sofr
 
-    ticker = None
-    hist = pd.DataFrame()
-    expirations: tuple = ()
-    last_err = None
-
-    # 💡 [핵심 수정] 시세(history)뿐만 아니라 옵션 만기일(options)까지 무사히 가져오는지 세션별로 검증
-    for sess in _make_sessions():
-        try:
-            tk = yf.Ticker(SYMBOL, session=sess) if sess is not None else yf.Ticker(SYMBOL)
-            h = tk.history(period="5d")
-            if h is None or h.empty:
-                continue
-
-            # 옵션 만기일 목록 찔러보기 (차단당한 세션은 에러가 나거나 빈 튜플 반환)
-            exps = getattr(tk, "options", ())
-            if not exps:
-                continue # 이 세션은 옵션 조회가 차단됨 -> 다음 세션으로 넘어감
-
-            # 둘 다 성공하면 이 세션으로 최종 확정!
-            ticker = tk
-            hist = h
-            expirations = tuple(exps)
-            break
-        except Exception as e:
-            last_err = e
-            continue
-
-    if ticker is None or hist.empty or not expirations:
+    # 💡 [핵심 수정] 가짜 세션 주입을 모두 폐기하고, 순수 yfinance Ticker 객체만 활용
+    try:
+        ticker = yf.Ticker(SYMBOL)
+        hist = ticker.history(period="5d")
+    except Exception as e:
         return None, (f"야후에서 주가 또는 옵션 데이터를 불러오지 못했습니다. "
-                      "API가 완전히 차단되었거나 점검 중일 수 있습니다."), stats
+                      f"API가 완전히 차단되었거나 점검 중일 수 있습니다. ({str(e)[:60]})"), stats
+
+    if hist is None or hist.empty:
+        return None, "야후에서 주가 데이터를 불러오지 못했습니다. API 응답이 비어있습니다.", stats
 
     etf_price = round(float(hist["Close"].iloc[-1]), 2)
     quote_date = hist.index[-1].date()
     stats["quote_date"] = quote_date
     stats["etf_price"] = etf_price
+
+    expirations: tuple = ()
+    for attempt in range(max(1, retries) + 1):
+        try:
+            # yfinance 내부 매니저가 크럼브를 알아서 받아옵니다.
+            expirations = tuple(ticker.options or ())
+        except Exception:
+            expirations = ()
+        if expirations:
+            break
+        time.sleep(1.5 * (attempt + 1))
+
+    if not expirations:
+        return None, ("야후가 만기일 목록을 주지 않습니다 (차단 의심)."), stats
 
     frames, skipped = [], []
     for exp in expirations:
@@ -806,7 +768,7 @@ def extract_daily_options(retries: int = 2) -> tuple[pd.DataFrame | None, str | 
         except Exception as e:
             skipped.append(f"{exp}({str(e)[:30]})")
         
-        # 💡 [핵심 수정] 야후 서버의 연속 호출 차단을 막기 위해 만기일(Chain)마다 0.3초 휴식
+        # 💡 [유지] 야후 서버의 연속 호출 차단을 막기 위해 만기일(Chain)마다 0.3초 휴식
         time.sleep(0.3)
 
     if skipped:
