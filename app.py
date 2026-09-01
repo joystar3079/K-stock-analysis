@@ -21,8 +21,8 @@ import pandas as pd
 import streamlit as st
 from github import Github
 
-from config import (DEFAULT_SOFR, DISPLAY_COLS, ENGINES, MAX_HISTORY,
-                    PRICE_HISTORY_START, SYMBOL)
+from config import (DEFAULT_SOFR, DISPLAY_COLS, ENGINES, MASTER_FILE,
+                    MAX_HISTORY, PRICE_HISTORY_START, SYMBOL)
 from data_io import (diagnose_quote_date, extract_daily_options,
                      fetch_etf_history, load_master_data, merge_master,
                      merge_report, push_master_to_github)
@@ -31,11 +31,11 @@ from data_io import (diagnose_quote_date, extract_daily_options,
 # 저장소에 구버전 data_io.py 가 남아 있어도 앱 전체가 죽지 않도록 방어합니다.
 # (ImportError 로 앱이 통째로 멈추면 원인 파악이 어렵기 때문입니다.)
 try:
-    from data_io import (DOWNLOAD_FOLDER, build_filename,
+    from data_io import (DOWNLOAD_FOLDER, auto_update_master, build_filename,
                          extract_options_from_file, extract_options_from_files,
                          latest_data_date, load_price_history_from_file,
-                         merge_many, save_to_local_folder, to_csv_bytes,
-                         to_zip_bytes)
+                         master_summary, merge_many, save_to_local_folder,
+                         to_csv_bytes, to_zip_bytes)
     IO_OK, IO_ERR = True, ""
 except ImportError as _e:
     IO_OK, IO_ERR = False, str(_e)
@@ -100,6 +100,25 @@ except ImportError as _e:
             rep["rows_after"] = len(merged)
             reports.append(rep)
         return merged, reports
+
+    def master_summary(df):
+        if df is None or df.empty:
+            return {"rows": 0, "days": 0, "start": None, "end": None}
+        d = pd.to_datetime(df["Quote Date"], errors="coerce").dropna()
+        return {"rows": len(df), "days": int(d.dt.normalize().nunique()),
+                "start": d.min(), "end": d.max()}
+
+    def auto_update_master(current, new, on_conflict="skip"):
+        before = master_summary(current)
+        base = current if current is not None else pd.DataFrame()
+        rep = merge_report(base, new)
+        merged = merge_master(base, new, on_conflict=on_conflict)
+        rows = push_master_to_github(merged, latest_data_date(new))
+        after = master_summary(merged)
+        return {"file": MASTER_FILE, "policy": on_conflict,
+                "before": before, "after": after,
+                "added_rows": rows - before["rows"],
+                "added_days": after["days"] - before["days"], "report": rep}
 
 try:
     from data_io import IO_VERSION
@@ -291,6 +310,31 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
     meta["n_dates"] = len(df)
     return df, meta
 
+def store_extraction(df_ext, stats, file_results=None) -> None:
+    """추출 결과를 세션에 담고, 자동 반영이 켜져 있으면 GitHub 마스터까지 갱신합니다.
+
+    저장 위치는 config 의 MASTER_FILE 로 고정이라 폴더를 고를 필요가 없습니다.
+    중복 날짜는 skip — 이미 쌓인 기록을 자동 갱신이 덮어쓰는 일은 없습니다.
+    """
+    for k in ("extract_error_stats", "extract_error_msg", "accumulated_preview",
+              "accumulated_steps", "push_result", "push_error"):
+        st.session_state.pop(k, None)
+    st.session_state["recent_extracted_data"] = df_ext
+    st.session_state["extract_stats"] = stats
+    st.session_state["file_results"] = file_results
+
+    if not st.session_state.get("auto_push", False):
+        return
+    try:
+        current = load_master_data(st.session_state["master_version"])
+        st.session_state["push_result"] = auto_update_master(
+            current, df_ext, on_conflict="skip")
+        st.session_state["master_version"] = uuid.uuid4().hex[:8]
+        load_master_data.clear()
+    except Exception as e:
+        st.session_state["push_error"] = str(e)
+
+
 def run_quant_engine(version: str, mode: str, target_date=None,
                      target_start=None, target_end=None) -> tuple[pd.DataFrame, dict]:
     df, meta = build_full_frame(version)
@@ -386,6 +430,11 @@ with st.sidebar:
             label_visibility="collapsed", key="source_mode",
             help="야후가 차단된 서버에서는 업로드 경로를 사용하세요. 산출 결과는 동일합니다.")
 
+    st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영 (`{MASTER_FILE}`)",
+                value=True, key="auto_push",
+                help="추출/변환이 끝나면 곧바로 GitHub 마스터에 병합·커밋합니다. "
+                     "중복 날짜는 기존 기록을 유지(skip)하므로 덮어쓸 위험이 없습니다.")
+
     # ── 경로 A: 파일 업로드 (야후 차단과 무관) ─────────────────────
     if IO_OK and source_mode.startswith("📁"):
         up_files = st.file_uploader(
@@ -454,12 +503,8 @@ with st.sidebar:
                 st.session_state["extract_error_stats"] = stats
                 st.session_state["extract_error_msg"] = err
             else:
-                st.session_state.pop("extract_error_stats", None)
-                st.session_state.pop("extract_error_msg", None)
-                st.session_state.pop("accumulated_preview", None)
-                st.session_state["recent_extracted_data"] = df_ext
-                st.session_state["extract_stats"] = stats
-                st.session_state["file_results"] = file_results
+                with st.spinner("GitHub 마스터에 자동 반영 중..."):
+                    store_extraction(df_ext, stats, file_results)
                 st.rerun()
 
     # ── 경로 B: 야후 자동 수집 (보조) ──────────────────────────────
@@ -473,10 +518,8 @@ with st.sidebar:
                 st.session_state["extract_error_stats"] = stats
                 st.session_state["extract_error_msg"] = err
             else:
-                st.session_state.pop("extract_error_stats", None)
-                st.session_state.pop("extract_error_msg", None)
-                st.session_state["recent_extracted_data"] = df_ext
-                st.session_state["extract_stats"] = stats
+                with st.spinner("GitHub 마스터에 자동 반영 중..."):
+                    store_extraction(df_ext, stats)
                 st.rerun()
 
     if "recent_extracted_data" in st.session_state:
@@ -514,7 +557,6 @@ with st.sidebar:
                         st.rerun()
 
     st.divider()
-    st.markdown("#### ⎈ 퀀트 엔진 버젼 선택")
     engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
 
     st.divider()
@@ -639,38 +681,61 @@ if "recent_extracted_data" in st.session_state:
                f"'{DOWNLOAD_FOLDER}' 폴더로 받으시려면 zip 을 받아 푸시거나, "
                "브라우저 설정에서 '다운로드 전에 저장 위치 확인'을 켜두세요.")
 
-    # ── 누적 병합본 ──────────────────────────────────────────────────
-    st.markdown("##### 📚 누적 데이터 병합")
+    # ── 누적 데이터: GitHub 마스터 자동 반영 ────────────────────────
+    st.markdown(f"##### ☁️ 누적 데이터 — GitHub 자동 반영 (`{MASTER_FILE}`)")
+
+    push_err = st.session_state.get("push_error")
+    push_res = st.session_state.get("push_result")
+
+    if push_err:
+        st.error(f"자동 반영 실패: {push_err}")
+        st.caption("secrets 의 GITHUB_TOKEN / GITHUB_REPO 를 확인하세요. "
+                   "아래 수동 버튼으로 다시 시도할 수 있습니다.")
+    elif push_res:
+        b, a = push_res["before"], push_res["after"]
+        st.success(
+            f"✅ 자동 반영 완료 — {b['rows']:,}행/{b['days']:,}일 → "
+            f"**{a['rows']:,}행/{a['days']:,}일** "
+            f"(+{push_res['added_rows']:,}행, +{push_res['added_days']}일)")
+        if push_res["report"]["conflict_dates"]:
+            st.caption("중복 날짜 "
+                       f"{', '.join(str(d) for d in push_res['report']['conflict_dates'])} "
+                       "는 기존 기록을 유지했습니다. 새 스냅샷으로 덮으려면 아래에서 "
+                       "'새 추출본으로 통째 교체'를 고르고 수동 반영하세요.")
+        st.caption("GitHub raw 캐시 반영에 최대 5분 걸릴 수 있습니다.")
+    elif not st.session_state.get("auto_push", False):
+        st.info("자동 반영이 꺼져 있습니다. 아래 버튼으로 직접 반영하세요.")
+
     policy = st.session_state["merge_policy"]
     pol_txt = "기존 유지(skip)" if policy == "skip" else "새 추출본으로 교체(replace)"
-    st.caption(f"마스터 {len(master_info):,}행 + 추출본 {len(df_ext):,}행 "
-               f"· 중복 날짜 처리: {pol_txt}")
+    if st.button(f"🔁 지금 반영 (정책: {pol_txt})", use_container_width=True):
+        with st.spinner("마스터 병합 및 GitHub 반영 중..."):
+            try:
+                st.session_state["push_result"] = auto_update_master(
+                    master_info, df_ext, on_conflict=policy)
+                st.session_state.pop("push_error", None)
+                st.session_state["master_version"] = uuid.uuid4().hex[:8]
+                load_master_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.session_state["push_error"] = str(e)
+                st.rerun()
 
-    if st.button("🔗 누적 병합본 생성", use_container_width=True):
-        with st.spinner("마스터와 추출본을 병합하는 중..."):
-            merged_prev, merge_steps = merge_many(master_info, [df_ext], on_conflict=policy)
-        st.session_state["accumulated_preview"] = merged_prev
-        st.session_state["accumulated_steps"] = merge_steps
+    with st.expander("🗄 누적 데이터 백업 다운로드 (선택)"):
+        st.caption("평소에는 필요 없습니다. GitHub 마스터가 원본이고 자동으로 갱신됩니다. "
+                   "외부 분석용 스냅샷이 필요할 때만 쓰세요.")
+        if st.button("누적본 CSV 만들기", use_container_width=True):
+            with st.spinner("병합본 생성 중..."):
+                acc_df, _ = merge_many(master_info, [df_ext], on_conflict=policy)
+            st.session_state["accumulated_preview"] = acc_df
 
-    acc = st.session_state.get("accumulated_preview")
-    if acc is not None and not acc.empty:
-        acc_date = latest_data_date(acc)
-        fn_acc = build_filename(acc_date, "누적데이터")
-        csv_acc = to_csv_bytes(acc)
-        n_days = acc["Quote Date"].nunique()
-        st.success(f"병합 완료 — {len(acc):,}행 / {n_days:,}일 "
-                   f"({pd.to_datetime(acc['Quote Date']).min():%Y-%m-%d} ~ "
-                   f"{pd.to_datetime(acc['Quote Date']).max():%Y-%m-%d})")
-
-        a1, a2 = st.columns(2)
-        a1.download_button(
-            "📚 누적 병합본 CSV", data=csv_acc, file_name=fn_acc,
-            mime="text/csv", use_container_width=True)
-        a2.download_button(
-            f"🗂 {DOWNLOAD_FOLDER} 폴더 (최근+누적 zip)",
-            data=to_zip_bytes({fn_latest: csv_latest, fn_acc: csv_acc}),
-            file_name=build_filename(acc_date, "전체", "zip"),
-            mime="application/zip", use_container_width=True)
+        acc = st.session_state.get("accumulated_preview")
+        if acc is not None and not acc.empty:
+            acc_date = latest_data_date(acc)
+            st.download_button(
+                "📚 누적본 CSV 다운로드", data=to_csv_bytes(acc),
+                file_name=build_filename(acc_date, "누적데이터"),
+                mime="text/csv", use_container_width=True)
 
     # ── 로컬 폴더 직접 저장 (로컬 실행 시에만 유효) ────────────────
     with st.expander(f"💾 '{DOWNLOAD_FOLDER}' 폴더에 직접 저장 (로컬 실행 전용)"):
@@ -721,24 +786,12 @@ if "recent_extracted_data" in st.session_state:
     st.dataframe(df_ext.head(5), use_container_width=True, hide_index=True)
 
     st.divider()
-    st.markdown("#### ☁️ 클라우드 마스터 데이터베이스 업데이트")
-    if st.button("🚀 옵션데이터 누적관리", type="primary"):
-        with st.spinner("GitHub 마스터 파일에 병합 중..."):
-            try:
-                merged = merge_master(master_info, df_ext,
-                                      on_conflict=st.session_state["merge_policy"])
-                n = push_master_to_github(merged, df_ext["Quote Date"].iloc[0])
-                st.success(f"🎉 업데이트 완료 (정책: {st.session_state['merge_policy']}, "
-                           f"총 누적 {n:,}행)")
-                for k in ("recent_extracted_data", "extract_stats", "file_results",
-                          "accumulated_preview", "accumulated_steps"):
-                    st.session_state.pop(k, None)
-                st.session_state["master_version"] = uuid.uuid4().hex[:8]
-                load_master_data.clear()
-                st.info("GitHub raw 캐시 반영에 최대 5분 걸릴 수 있습니다.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"업데이트 실패: {e}")
+    if st.button("🧹 작업 정리 (추출본 비우기)", use_container_width=True):
+        for k in ("recent_extracted_data", "extract_stats", "file_results",
+                  "accumulated_preview", "accumulated_steps",
+                  "push_result", "push_error"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 # =====================================================================
 # [결과 화면 2] 분석 실행

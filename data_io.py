@@ -31,7 +31,7 @@ from pricing import bs_delta_batch, solve_iv_batch
 MASTER_KEYS = ["Quote Date", "Expiration Date", "Option Type", "Strike"]
 
 # app.py 가 구버전 data_io.py 배포를 감지하는 데 쓰는 표식입니다.
-IO_VERSION = "V31"
+IO_VERSION = "V32"
 
 FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Strike", "Bid", "Ask", "Last Price", "Volume", "Open Interest",
@@ -667,7 +667,7 @@ def merge_master(current: pd.DataFrame, new: pd.DataFrame,
 
 
 def push_master_to_github(merged: pd.DataFrame, quote_date) -> int:
-    """GitHub에 마스터 파일 덮어쓰기. 실패 시 예외를 그대로 올립니다."""
+    """GitHub 마스터 파일 갱신. 파일이 없으면 새로 만듭니다."""
     from github import Github
 
     missing = [k for k in ("GITHUB_TOKEN", "GITHUB_REPO") if k not in st.secrets]
@@ -676,12 +676,53 @@ def push_master_to_github(merged: pd.DataFrame, quote_date) -> int:
 
     buffer = io.BytesIO()
     merged.to_pickle(buffer, compression="gzip")
+    payload = buffer.getvalue()
 
     repo = Github(st.secrets["GITHUB_TOKEN"]).get_repo(st.secrets["GITHUB_REPO"])
-    contents = repo.get_contents(MASTER_FILE)
-    repo.update_file(contents.path, f"Auto-update master data: {quote_date}",
-                     buffer.getvalue(), contents.sha)
+    msg = f"Auto-update master data: {quote_date}"
+    try:
+        contents = repo.get_contents(MASTER_FILE)
+        repo.update_file(contents.path, msg, payload, contents.sha)
+    except Exception:
+        # 최초 1회 — 저장소에 마스터 파일이 아직 없는 경우
+        repo.create_file(MASTER_FILE, f"Create master data: {quote_date}", payload)
     return len(merged)
+
+
+def master_summary(df: pd.DataFrame) -> dict:
+    """마스터 현황 요약. 화면 표시용."""
+    if df is None or df.empty:
+        return {"rows": 0, "days": 0, "start": None, "end": None}
+    d = pd.to_datetime(df["Quote Date"], errors="coerce").dropna()
+    return {
+        "rows": len(df),
+        "days": int(d.dt.normalize().nunique()),
+        "start": d.min(),
+        "end": d.max(),
+    }
+
+
+def auto_update_master(current: pd.DataFrame, new: pd.DataFrame,
+                       on_conflict: str = "skip") -> dict:
+    """마스터 병합 + GitHub 반영을 한 번에 처리합니다.
+
+    저장 위치는 config 의 MASTER_FILE 로 고정되어 있어 폴더를 고를 필요가 없습니다.
+    실패하면 예외를 그대로 올려서 호출부가 사용자에게 보여주도록 합니다.
+    """
+    before = master_summary(current)
+    rep = merge_report(current if current is not None else pd.DataFrame(), new)
+    merged = merge_master(current, new, on_conflict=on_conflict)
+    rows = push_master_to_github(merged, latest_data_date(new))
+    after = master_summary(merged)
+    return {
+        "file": MASTER_FILE,
+        "policy": on_conflict,
+        "before": before,
+        "after": after,
+        "added_rows": rows - before["rows"],
+        "added_days": after["days"] - before["days"],
+        "report": rep,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
