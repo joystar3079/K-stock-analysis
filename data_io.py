@@ -1,23 +1,13 @@
 """데이터 입출력 — 시세, 마스터 파일, 일일 옵션 추출.
 
 [V29 수정] 같은 Quote Date 에 대해 두 스냅샷이 뒤섞이던 문제를 막습니다.
-
-기존 merge_master 는 (Quote Date, Expiration Date, Option Type, Strike) 키가
-겹치는 행만 교체했습니다. 라이브 옵션 체인은 과거 기록과 만기 구성·행사가
-범위가 다르고 당일 미결제약정이 아직 0인 경우가 많아서, 이미 존재하는 날짜를
-재추출하면 옛 행과 새 행이 뒤섞인 '혼종'이 만들어졌습니다. 그 날짜의 OI 집계
-지표가 통째로 왜곡되고, 세션에 추출 데이터가 남아 있는 한 모든 분석에 계속
-반영되었습니다.
-
-이제 병합은 항상 '날짜 단위'로 처리합니다.
-  skip    : 이미 있는 날짜는 건너뜁니다 (기본 — 기록 보존)
-  replace : 해당 날짜의 기존 행을 전부 지우고 새 스냅샷으로 통째 교체
-어느 쪽이든 한 날짜 안에 두 스냅샷이 섞이는 일은 발생하지 않습니다.
+[긴급 수정] Streamlit 서버 환경의 야후 파이낸스 API 차단 방어 로직 (커스텀 세션/재시도) 추가
 """
 from __future__ import annotations
 
 import io
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -113,14 +103,7 @@ def merge_report(current: pd.DataFrame, new: pd.DataFrame) -> dict:
 
 def merge_master(current: pd.DataFrame, new: pd.DataFrame,
                  on_conflict: str = "skip") -> pd.DataFrame:
-    """날짜 단위 병합.
-
-    on_conflict
-      "skip"    : 마스터에 이미 있는 Quote Date 는 신규분을 버립니다 (기본)
-      "replace" : 해당 날짜의 마스터 행을 전부 제거하고 신규분으로 대체합니다
-
-    두 경우 모두 한 날짜 안에서 옛 스냅샷과 새 스냅샷이 섞이지 않습니다.
-    """
+    """날짜 단위 병합."""
     if on_conflict not in ("skip", "replace"):
         raise ValueError(f"on_conflict 는 'skip' 또는 'replace' — 받은 값: {on_conflict}")
 
@@ -142,7 +125,6 @@ def merge_master(current: pd.DataFrame, new: pd.DataFrame,
         return cur.sort_values("Quote Date").reset_index(drop=True)
 
     merged = pd.concat([cur, new_n], ignore_index=True)
-    # 같은 날짜 안에서는 이제 한 출처만 존재하므로, 이 단계는 순수 안전장치입니다
     return (merged.drop_duplicates(subset=MASTER_KEYS, keep="last")
                   .sort_values("Quote Date").reset_index(drop=True))
 
@@ -180,9 +162,18 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
     sofr = _fetch_sofr()
     stats["sofr"] = sofr
 
-    ticker = yf.Ticker(SYMBOL)
+    # 💡 [핵심 수정 1] 일반 브라우저로 위장하는 커스텀 세션 주입 (API 차단 방어)
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "*/*"
+    })
+    ticker = yf.Ticker(SYMBOL, session=session)
+
     try:
         hist = ticker.history(period="5d")
+        if hist.empty:
+            return None, "주가 데이터를 불러올 수 없습니다 (빈 응답).", stats
         etf_price = round(float(hist["Close"].iloc[-1]), 2)
         quote_date = hist.index[-1].date()
     except Exception as e:
@@ -192,6 +183,10 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
 
     try:
         expirations = ticker.options
+        # 💡 [핵심 수정 2] 야후가 빈 튜플을 반환하면 1.5초 대기 후 재요청
+        if not expirations:
+            time.sleep(1.5)
+            expirations = ticker.options
     except Exception as e:
         return None, f"만기일 데이터를 가져올 수 없습니다: {e}", stats
 
@@ -200,18 +195,24 @@ def extract_daily_options() -> tuple[pd.DataFrame | None, str | None, dict]:
         try:
             chain = ticker.option_chain(exp)
             for side, tag in ((chain.calls, "Call"), (chain.puts, "Put")):
+                if side.empty: continue # 빈 데이터프레임 방어
                 part = side.copy()
                 part["Option Type"] = tag
                 part["Expiration Date"] = exp
                 frames.append(part)
         except Exception as e:
             skipped.append(f"{exp}({str(e)[:30]})")
+            
     if skipped:
         stats["skipped_expirations"] = skipped
     if not frames:
-        return None, "옵션 데이터가 없습니다.", stats
+        return None, "현재 야후 파이낸스에서 수집할 수 있는 옵션 데이터가 없습니다. (API 차단 의심)", stats
 
-    df = pd.concat(frames, ignore_index=True).rename(columns={
+    df = pd.concat(frames, ignore_index=True)
+    if df.empty:
+         return None, "병합된 옵션 데이터의 행(Row)이 존재하지 않습니다.", stats
+
+    df = df.rename(columns={
         "contractSymbol": "Contract Name", "strike": "Strike", "bid": "Bid",
         "ask": "Ask", "lastPrice": "Last Price", "volume": "Volume",
         "openInterest": "Open Interest"})
