@@ -1,8 +1,13 @@
-"""EWY Quant Analytics V29 — Streamlit UI.
+"""EWY Quant Analytics V30 — Streamlit UI.
 
 [V29 8개 파일 모듈화 전용 UI]
 수학 연산과 판정 로직은 완벽히 분리되어 다른 파일에서 불러옵니다.
 새창 열기 동기화 우회, 퀵링크, 우측 쌍둥이 버튼 정렬, 마스터 최신 다운로드 기능이 적용되었습니다.
+
+[V30] 야후 파이낸스 차단 무관 운영
+  · 옵션 체인: 엑셀/CSV 업로드 경로가 기본, 야후 자동수집은 보조
+  · 시세: 야후 → stooq 자동 폴백, 둘 다 막히면 시세 파일 업로드로 대체
+  · 자동 인식 실패 시 종가·기준일·SOFR 를 수동 보정할 수 있는 입력란 제공
 """
 from __future__ import annotations
 
@@ -16,17 +21,18 @@ import pandas as pd
 import streamlit as st
 from github import Github
 
-from config import (DISPLAY_COLS, ENGINES, MAX_HISTORY, PRICE_HISTORY_START,
-                    SYMBOL)
+from config import (DEFAULT_SOFR, DISPLAY_COLS, ENGINES, MAX_HISTORY,
+                    PRICE_HISTORY_START, SYMBOL)
 from data_io import (diagnose_quote_date, extract_daily_options,
-                     fetch_etf_history, load_master_data, merge_master,
-                     merge_report, push_master_to_github)
+                     extract_options_from_file, fetch_etf_history,
+                     load_master_data, load_price_history_from_file,
+                     merge_master, merge_report, push_master_to_github)
 from features import aggregate_oi_features, attach_price
 from phases import assign_phases
 from presenters import add_display_columns
 
 warnings.filterwarnings("ignore")
-st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V29",
+st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V30",
                    page_icon="📈", layout="wide")
 
 # =====================================================================
@@ -121,6 +127,7 @@ st.session_state.setdefault("analysis_history", [])
 st.session_state.setdefault("master_version", "")
 st.session_state.setdefault("merge_policy", "skip")
 st.session_state.setdefault("edit_links_mode", False)
+st.session_state.setdefault("price_history_override", None)
 
 if "quick_links" not in st.session_state:
     st.session_state["quick_links"] = load_quick_links()
@@ -179,8 +186,21 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
     if master_df.empty:
         return pd.DataFrame(), meta
 
+    # 시세: 업로드 파일이 있으면 최우선, 없으면 야후 → stooq 폴백
     end_date = (datetime.today() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-    px = fetch_etf_history(SYMBOL, PRICE_HISTORY_START, end_date)
+    px = st.session_state.get("price_history_override")
+    if px is not None and not px.empty:
+        meta["price_source"] = "업로드 파일"
+        mask = ((px["Date"] >= pd.to_datetime(PRICE_HISTORY_START))
+                & (px["Date"] <= pd.to_datetime(end_date)))
+        px = px[mask].reset_index(drop=True)
+    else:
+        px = fetch_etf_history(SYMBOL, PRICE_HISTORY_START, end_date)
+        meta["price_source"] = "야후/stooq"
+
+    if px is None or px.empty:
+        meta["price_error"] = True
+        return pd.DataFrame(), meta
 
     opt_df = aggregate_oi_features(master_df, px)
     if opt_df.empty:
@@ -222,7 +242,7 @@ def run_quant_engine(version: str, mode: str, target_date=None,
 # =====================================================================
 col_header, col_links = st.columns([0.65, 0.35])
 with col_header:
-    st.title(f"📈 {SYMBOL} Quant Analytics V29")
+    st.title(f"📈 {SYMBOL} Quant Analytics V30")
     st.markdown("**3-in-1 다중 전략 엔진 · 벡터화 연산 엔진 탑재**")
 
 with col_links:
@@ -271,20 +291,105 @@ st.divider()
 # =====================================================================
 with st.sidebar:
     st.markdown("#### ⛁ 데이터 관리")
-    if st.button("Daily 옵션데이터 추출", use_container_width=True):
-        with st.spinner("옵션 체인 수집 및 IV/Delta 벡터 연산 중..."):
-            df_ext, err, stats = extract_daily_options()
-        if err:
-            st.error(err)
-        else:
-            st.session_state["recent_extracted_data"] = df_ext
-            st.session_state["extract_stats"] = stats
+
+    source_mode = st.radio(
+        "수집 방식",
+        ("📁 엑셀/CSV 업로드", "🌐 야후 자동 수집"),
+        label_visibility="collapsed", key="source_mode",
+        help="야후가 차단된 서버에서는 업로드 경로를 사용하세요. 산출 결과는 동일합니다.")
+
+    # ── 경로 A: 파일 업로드 (야후 차단과 무관) ─────────────────────
+    if source_mode.startswith("📁"):
+        up_file = st.file_uploader(
+            "옵션 체인 파일", type=["csv", "xlsx", "xls", "xlsm"],
+            label_visibility="collapsed", key="chain_uploader")
+        st.caption("CBOE 원본(콜·풋 한 행) · 일반 롱 포맷 · 컬럼명 변형 자동 인식")
+
+        with st.expander("⚙️ 수동 보정 (자동 인식 실패 시)"):
+            use_price = st.checkbox("기초자산 종가 직접 입력", key="use_manual_price")
+            manual_price = st.number_input(
+                f"{SYMBOL} 종가 ($)", min_value=0.0, value=0.0, step=0.01,
+                format="%.2f", disabled=not use_price, key="manual_price")
+
+            use_date = st.checkbox("기준일 직접 지정", key="use_manual_date")
+            manual_date = st.date_input(
+                "기준일 (Quote Date)", datetime.today(),
+                disabled=not use_date, key="manual_qdate")
+
+            use_sofr = st.checkbox("SOFR 직접 입력", key="use_manual_sofr")
+            manual_sofr = st.number_input(
+                "SOFR (%)", min_value=0.0, value=float(DEFAULT_SOFR), step=0.01,
+                format="%.2f", disabled=not use_sofr, key="manual_sofr")
+
+        if st.button("📄 업로드 파일 변환", type="primary",
+                     use_container_width=True, disabled=up_file is None):
+            with st.spinner("파일 파싱 및 IV/Delta 벡터 연산 중..."):
+                df_ext, err, stats = extract_options_from_file(
+                    up_file,
+                    filename=getattr(up_file, "name", None),
+                    etf_price=(manual_price if use_price and manual_price > 0 else None),
+                    quote_date=(manual_date if use_date else None),
+                    sofr=(manual_sofr if use_sofr else None),
+                )
+            if err:
+                st.error(err)
+                st.session_state["extract_error_stats"] = stats
+                st.session_state["extract_error_msg"] = err
+            else:
+                st.session_state.pop("extract_error_stats", None)
+                st.session_state.pop("extract_error_msg", None)
+                st.session_state["recent_extracted_data"] = df_ext
+                st.session_state["extract_stats"] = stats
+                st.rerun()
+
+    # ── 경로 B: 야후 자동 수집 (보조) ──────────────────────────────
+    else:
+        st.caption("서버 IP가 차단되면 실패할 수 있습니다. 실패 시 업로드 경로를 쓰세요.")
+        if st.button("Daily 옵션데이터 추출", use_container_width=True):
+            with st.spinner("옵션 체인 수집 및 IV/Delta 벡터 연산 중..."):
+                df_ext, err, stats = extract_daily_options()
+            if err:
+                st.error(err)
+                st.session_state["extract_error_stats"] = stats
+                st.session_state["extract_error_msg"] = err
+            else:
+                st.session_state.pop("extract_error_stats", None)
+                st.session_state.pop("extract_error_msg", None)
+                st.session_state["recent_extracted_data"] = df_ext
+                st.session_state["extract_stats"] = stats
+                st.rerun()
 
     if "recent_extracted_data" in st.session_state:
         if st.button("↩️ 추출본 버리기 (마스터만 사용)", use_container_width=True):
             st.session_state.pop("recent_extracted_data", None)
             st.session_state.pop("extract_stats", None)
             st.rerun()
+
+    # ── 시세 폴백 ────────────────────────────────────────────────
+    with st.expander("📉 시세 파일 (야후 시세까지 막힐 때)"):
+        px_now = st.session_state.get("price_history_override")
+        if px_now is not None and not px_now.empty:
+            st.success(f"적용 중 — {len(px_now):,}일 "
+                       f"({px_now['Date'].min():%Y-%m-%d} ~ {px_now['Date'].max():%Y-%m-%d})")
+            if st.button("시세 파일 해제", use_container_width=True):
+                st.session_state["price_history_override"] = None
+                st.rerun()
+        else:
+            px_file = st.file_uploader(
+                f"{SYMBOL} 일봉 (Date / Close 컬럼)",
+                type=["csv", "xlsx", "xls"], key="px_uploader")
+            if px_file is not None and st.button("시세 적용", use_container_width=True):
+                try:
+                    px_df = load_price_history_from_file(
+                        px_file, getattr(px_file, "name", None))
+                except Exception as e:
+                    px_df = pd.DataFrame()
+                    st.error(f"시세 파일 읽기 실패: {e}")
+                if px_df.empty:
+                    st.error("Date / Close 컬럼을 찾지 못했습니다.")
+                else:
+                    st.session_state["price_history_override"] = px_df
+                    st.rerun()
 
     st.divider()
     st.markdown("#### ⎈ 퀀트 엔진 버젼 선택")
@@ -311,13 +416,45 @@ with st.sidebar:
 # =====================================================================
 # [결과 화면 1] 추출 완료 + 마스터 최신 다운로드 + 병합 정책
 # =====================================================================
+if st.session_state.get("extract_error_stats") is not None:
+    with st.expander("🩺 수집 실패 진단 — 파일에서 무엇을 읽었는지 확인", expanded=True):
+        est = st.session_state["extract_error_stats"]
+        st.error(st.session_state.get("extract_error_msg", "수집에 실패했습니다."))
+        cols = est.get("detected_columns")
+        if cols:
+            st.write("**인식된 컬럼:** " + ", ".join(str(c) for c in cols))
+            st.caption("Strike / Expiration Date / Option Type 중 빠진 게 있으면 "
+                       "원본 파일의 헤더를 확인하거나 수동 보정 입력란을 사용하세요.")
+        else:
+            st.caption("헤더 자체를 찾지 못했습니다. 파일 상단의 안내문이 너무 길거나 "
+                       "옵션 체인이 아닌 시트일 수 있습니다.")
+        st.json(est)
+
 if "recent_extracted_data" in st.session_state:
     df_ext = st.session_state["recent_extracted_data"]
     stats = st.session_state.get("extract_stats", {})
     total = stats.get("total_rows", len(df_ext))
     priced = stats.get("priced_rows", 0)
-    st.success(f"✅ 연산 완료 — 전체 {total:,}행 중 유동성 있는 {priced:,}행만 IV 계산 "
-               f"(SOFR {stats.get('sofr', '-')}%, 기준일 {stats.get('quote_date', '-')})")
+    src_label = "📁 업로드 파일" if stats.get("source") == "file" else "🌐 야후 API"
+    price_txt = stats.get("etf_price", "-")
+    st.success(f"✅ 연산 완료 [{src_label}] — 전체 {total:,}행 중 유동성 있는 {priced:,}행만 IV 계산 "
+               f"(기준일 {stats.get('quote_date', '-')}, {SYMBOL} ${price_txt}, "
+               f"SOFR {stats.get('sofr', '-')}%)")
+
+    if stats.get("multi_quote_dates"):
+        st.warning(
+            f"⚠️ 업로드 파일에 날짜가 여러 개 섞여 있습니다 "
+            f"({', '.join(str(d) for d in stats['multi_quote_dates'])}). "
+            f"가장 최근 날짜 **{stats.get('quote_date')}** 만 사용했습니다. "
+            "다른 날짜를 쓰려면 사이드바의 '기준일 직접 지정'으로 골라 다시 변환하세요.")
+
+    if stats.get("price_source"):
+        st.caption(f"기초자산 종가 출처: {stats['price_source']} "
+                   "(파일에 종가 컬럼이 없어 외부에서 보충했습니다)")
+
+    filled_iv = stats.get("filled_from_file_Implied Volatility", 0)
+    if filled_iv:
+        st.caption(f"IV 산출이 실패한 {filled_iv:,}행은 파일에 들어있던 벤더 IV로 채웠습니다.")
 
     master_info = load_master_data(st.session_state["master_version"])
     rep = merge_report(master_info, df_ext)
@@ -404,7 +541,11 @@ if run_button:
         result_df, meta = run_quant_engine(engine_version, mode_selection,
                                            target_date, target_start, target_end)
     if result_df.empty:
-        st.error("❌ 조회 결과가 없습니다. 날짜 범위와 마스터 데이터를 확인하세요.")
+        if meta.get("price_error"):
+            st.error("❌ 시세를 가져오지 못했습니다 (야후·stooq 모두 실패). "
+                     "사이드바 **📉 시세 파일** 에 일봉 CSV를 올린 뒤 다시 실행하세요.")
+        else:
+            st.error("❌ 조회 결과가 없습니다. 날짜 범위와 마스터 데이터를 확인하세요.")
     else:
         anchor = meta.get("anchor_date")
         anchor_str = pd.to_datetime(anchor).strftime("%Y-%m-%d") if anchor is not None else "-"
@@ -414,6 +555,9 @@ if run_button:
         if meta.get("merged_extraction"):
             pol = "기존 유지" if meta.get("merge_policy") == "skip" else "새 추출본으로 교체"
             st.info(f"💡 업로드 전 추출본이 결합되었습니다 (중복 날짜 처리: {pol})")
+
+        if meta.get("price_source"):
+            st.caption(f"시세 출처: {meta['price_source']}")
 
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         detail = mode_selection
