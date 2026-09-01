@@ -1,39 +1,30 @@
-"""데이터 입출력 — 파일 업로드 전용 모듈 (API 자동 수집 폐기)
+"""데이터 입출력 — 파일 업로드 전용 모듈 (API 자동 수집 및 시세 수집 폐기)
 
-[V34 경량화 최종본] 
-  1) 야후 파이낸스 옵션 API 수집 경로 완전 삭제 (로컬 CSV 업로드 전용)
-  2) [오류 수정] 429 Too Many Requests (트래픽 초과) 방어 로직 추가
-     - 옵션 크롤링이 빠졌으므로, 시세(history) 조회 전용 브라우저 위장 세션 재투입
-     - 차단 시 지연 재시도(Exponential Backoff) 알고리즘 탑재
+[V34 경량화 완전판] 
+  1) 야후 파이낸스 옵션 및 시세 API 수집 경로 완전 삭제
+  2) 로컬/코랩에서 생성한 완성형 분석데이터 CSV 파일만 활용하여 외부 의존도 0% 달성
 """
 from __future__ import annotations
 
 import io
 import os
 import re
-import time
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
-import yfinance as yf
 
-from config import (DEFAULT_SOFR, DIVIDEND_YIELD, MASTER_FILE, PRICE_COL,
-                    SYMBOL, TH)
+from config import DEFAULT_SOFR, DIVIDEND_YIELD, MASTER_FILE, PRICE_COL, SYMBOL, TH
 from pricing import bs_delta_batch, solve_iv_batch
 
 MASTER_KEYS = ["Quote Date", "Expiration Date", "Option Type", "Strike"]
-IO_VERSION = "V34_File_Only_Final"
+IO_VERSION = "V34_Offline_Master"
 
 FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Strike", "Bid", "Ask", "Last Price", "Volume", "Open Interest",
               "Secured Overnight Financing Rate", PRICE_COL,
               "Implied Volatility", "Delta"]
-
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
 # ═══════════════════════════════════════════════════════════════════
 # 0. 컬럼명 정규화
@@ -157,7 +148,7 @@ def _to_num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 # ═══════════════════════════════════════════════════════════════════
-# 2. IV / Delta 산출 (결측치 발생 시 보완)
+# 2. IV / Delta 보완 (결측치 발생 시에만 연산)
 # ═══════════════════════════════════════════════════════════════════
 def enrich_option_frame(df: pd.DataFrame, etf_price: float, quote_date,
                         sofr: float, stats: dict | None = None,
@@ -288,74 +279,7 @@ def extract_options_from_file(src, *, filename: str | None = None) -> tuple[pd.D
     return final, None, stats
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. 기초자산 시세 수집 (MA 연산용 / 429 방어 로직 적용)
-# ═══════════════════════════════════════════════════════════════════
-def _stooq_history(symbol: str) -> pd.DataFrame:
-    tick = symbol.lower()
-    if not tick.endswith(".us") and "." not in tick and "^" not in tick: tick += ".us"
-    url = f"https://stooq.com/q/d/l/?s={tick}&i=d"
-    r = requests.get(url, timeout=20, headers={"User-Agent": _UA})
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text))
-    if df.empty or "Close" not in df.columns: return pd.DataFrame()
-    df["Date"] = pd.to_datetime(df["Date"]).dt.normalize()
-    return df.rename(columns={"Close": "Close Price"})[["Date", "Close Price"]]
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_etf_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """야후 → stooq 폴백 시세 수집.
-    옵션 조회가 빠졌으므로, 429(Too Many Requests) 트래픽 차단을 뚫기 위해 
-    강력한 브라우저 위장 세션을 시세 전용으로 다시 투입합니다.
-    """
-    empty = pd.DataFrame(columns=["Date", "Close Price"])
-    last_err = ""
-    
-    # 💡 [핵심 방어막] 시세 조회 전용 위장 세션 구축 (429 차단 우회)
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": _UA,
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate, br"
-    })
-
-    # 지연 재시도 (Exponential Backoff)
-    for attempt in range(3):
-        try:
-            tk = yf.Ticker(symbol, session=s)
-            px = tk.history(start=start_date, end=end_date).reset_index()
-            
-            if not px.empty:
-                if "Datetime" in px.columns:
-                    px = px.rename(columns={"Datetime": "Date"})
-                    
-                if "Close" in px.columns:
-                    px = px.rename(columns={"Close": "Close Price"})
-                    px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
-                    return px.sort_values("Date").dropna(subset=["Close Price"]).reset_index(drop=True)[["Date", "Close Price"]]
-                    
-        except Exception as e:
-            last_err = str(e)
-            # 429 에러(트래픽 초과) 발생 시 약간 대기 후 재시도
-            if "429" in last_err or "Too Many Requests" in last_err:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            else:
-                break # 다른 형태의 오류면 즉시 루프 탈출
-                
-    st.info(f"야후 시세 실패 — stooq 폴백 시도 ({last_err[:60]})")
-
-    try:
-        px = _stooq_history(symbol)
-        if not px.empty:
-            mask = ((px["Date"] >= pd.to_datetime(start_date)) & (px["Date"] <= pd.to_datetime(end_date)))
-            return px[mask].sort_values("Date").reset_index(drop=True)
-    except Exception:
-        pass
-    
-    return empty
-
-# ═══════════════════════════════════════════════════════════════════
-# 5. 마스터 파일 및 다중 병합
+# 4. 마스터 파일 및 다중 병합
 # ═══════════════════════════════════════════════════════════════════
 DOWNLOAD_FOLDER = "EWY Option"
 
@@ -392,6 +316,7 @@ def _repo_name() -> str | None:
 def load_master_data(cache_bust: str = "") -> pd.DataFrame:
     repo = _repo_name()
     if repo:
+        import requests
         url = f"https://raw.githubusercontent.com/{repo}/main/{MASTER_FILE}"
         try:
             resp = requests.get(url, timeout=30)
