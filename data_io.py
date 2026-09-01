@@ -30,6 +30,9 @@ from pricing import bs_delta_batch, solve_iv_batch
 
 MASTER_KEYS = ["Quote Date", "Expiration Date", "Option Type", "Strike"]
 
+# app.py 가 구버전 data_io.py 배포를 감지하는 데 쓰는 표식입니다.
+IO_VERSION = "V30"
+
 FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Strike", "Bid", "Ask", "Last Price", "Volume", "Open Interest",
               "Secured Overnight Financing Rate", PRICE_COL,
