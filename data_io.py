@@ -465,7 +465,6 @@ def _make_sessions() -> list:
         pass
 
     s = requests.Session()
-    # 💡 [핵심 수정] 야후가 봇으로 인식하지 못하도록 브라우저 User-Agent 및 Accept 헤더 강화
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -513,18 +512,15 @@ def fetch_etf_history(symbol: str, start_date: str, end_date: str) -> pd.DataFra
     empty = pd.DataFrame(columns=["Date", "Close Price"])
 
     last_err = None
-    # 💡 [핵심 수정] 시세 다운로드 시에도 차단 우회 세션(_make_sessions)을 순서대로 투입
     for sess in _make_sessions():
         try:
             kw = {"start": start_date, "end": end_date, "progress": False}
             if sess is not None:
                 kw["session"] = sess
             
-            # 최신 yfinance에서 충돌을 일으키는 auto_adjust=False 파라미터 삭제
             px = yf.download(symbol, **kw).reset_index()
             
             if not px.empty:
-                # yfinance >= 0.2.40 의 MultiIndex 컬럼 오류 완벽 방어
                 if isinstance(px.columns, pd.MultiIndex):
                     px.columns = [c[0] if isinstance(c, tuple) else c for c in px.columns]
                 
@@ -762,41 +758,39 @@ def extract_daily_options(retries: int = 2) -> tuple[pd.DataFrame | None, str | 
 
     ticker = None
     hist = pd.DataFrame()
+    expirations: tuple = ()
     last_err = None
+
+    # 💡 [핵심 수정] 시세(history)뿐만 아니라 옵션 만기일(options)까지 무사히 가져오는지 세션별로 검증
     for sess in _make_sessions():
         try:
             tk = yf.Ticker(SYMBOL, session=sess) if sess is not None else yf.Ticker(SYMBOL)
             h = tk.history(period="5d")
-            if h is not None and not h.empty:
-                ticker, hist = tk, h
-                break
+            if h is None or h.empty:
+                continue
+
+            # 옵션 만기일 목록 찔러보기 (차단당한 세션은 에러가 나거나 빈 튜플 반환)
+            exps = getattr(tk, "options", ())
+            if not exps:
+                continue # 이 세션은 옵션 조회가 차단됨 -> 다음 세션으로 넘어감
+
+            # 둘 다 성공하면 이 세션으로 최종 확정!
+            ticker = tk
+            hist = h
+            expirations = tuple(exps)
+            break
         except Exception as e:
             last_err = e
             continue
 
-    if ticker is None or hist.empty:
-        return None, (f"야후에서 주가를 불러오지 못했습니다 ({str(last_err)[:60]}). "
-                      "엑셀/CSV 업로드 경로를 사용해 주세요."), stats
+    if ticker is None or hist.empty or not expirations:
+        return None, (f"야후에서 주가 또는 옵션 데이터를 불러오지 못했습니다. "
+                      "API가 완전히 차단되었거나 점검 중일 수 있습니다."), stats
 
     etf_price = round(float(hist["Close"].iloc[-1]), 2)
     quote_date = hist.index[-1].date()
     stats["quote_date"] = quote_date
     stats["etf_price"] = etf_price
-
-    expirations: tuple = ()
-    for attempt in range(max(1, retries) + 1):
-        try:
-            expirations = tuple(ticker.options or ())
-        except Exception as e:
-            last_err = e
-            expirations = ()
-        if expirations:
-            break
-        time.sleep(1.5 * (attempt + 1))
-
-    if not expirations:
-        return None, ("야후가 만기일 목록을 주지 않습니다 (차단 의심). "
-                      "엑셀/CSV 업로드 경로를 사용해 주세요."), stats
 
     frames, skipped = [], []
     for exp in expirations:
@@ -811,12 +805,14 @@ def extract_daily_options(retries: int = 2) -> tuple[pd.DataFrame | None, str | 
                 frames.append(part)
         except Exception as e:
             skipped.append(f"{exp}({str(e)[:30]})")
+        
+        # 💡 [핵심 수정] 야후 서버의 연속 호출 차단을 막기 위해 만기일(Chain)마다 0.3초 휴식
+        time.sleep(0.3)
 
     if skipped:
         stats["skipped_expirations"] = skipped
     if not frames:
-        return None, ("수집 가능한 옵션 데이터가 없습니다 (API 차단 의심). "
-                      "엑셀/CSV 업로드 경로를 사용해 주세요."), stats
+        return None, ("수집 가능한 옵션 데이터가 없습니다 (API 차단 의심)."), stats
 
     df = standardize_option_columns(pd.concat(frames, ignore_index=True))
     if df.empty:
