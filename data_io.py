@@ -3,7 +3,8 @@
 [V34 경량화] 
   1) 야후 파이낸스 옵션 API 수집 경로(extract_daily_options) 완전 삭제
   2) 로컬/코랩에서 생성한 분석데이터 CSV 파일 업로드 전용으로 최적화
-  3) 시세 조회(fetch_etf_history)는 이동평균선(MA) 계산을 위해 순정 yfinance로 유지
+  3) [오류 수정] 시세 조회(fetch_etf_history)를 차단에 취약한 yf.download 대신
+     가장 안정적인 자체 우회 모듈인 yf.Ticker().history() 방식으로 교체
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from config import (DEFAULT_SOFR, DIVIDEND_YIELD, MASTER_FILE, PRICE_COL,
 from pricing import bs_delta_batch, solve_iv_batch
 
 MASTER_KEYS = ["Quote Date", "Expiration Date", "Option Type", "Strike"]
-IO_VERSION = "V34_File_Only"
+IO_VERSION = "V34_File_Only_Fixed"
 
 FINAL_COLS = ["Contract Name", "Quote Date", "Expiration Date", "Option Type",
               "Strike", "Bid", "Ask", "Last Price", "Volume", "Open Interest",
@@ -286,7 +287,7 @@ def extract_options_from_file(src, *, filename: str | None = None) -> tuple[pd.D
     return final, None, stats
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. 기초자산 시세 수집 (MA 연산용 / 야후 순정 사용)
+# 4. 기초자산 시세 수집 (MA 연산용 / 야후 순정 객체 사용)
 # ═══════════════════════════════════════════════════════════════════
 def _stooq_history(symbol: str) -> pd.DataFrame:
     tick = symbol.lower()
@@ -303,13 +304,18 @@ def _stooq_history(symbol: str) -> pd.DataFrame:
 def fetch_etf_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     empty = pd.DataFrame(columns=["Date", "Close Price"])
     try:
-        kw = {"start": start_date, "end": end_date, "progress": False}
-        px = yf.download(symbol, **kw).reset_index()
+        # 💡 [핵심 수정] yf.download() 대신 야후 차단 방어력이 훨씬 뛰어난 yf.Ticker().history() 방식으로 원복
+        tk = yf.Ticker(symbol)
+        px = tk.history(start=start_date, end=end_date).reset_index()
+        
         if not px.empty:
-            if isinstance(px.columns, pd.MultiIndex):
-                px.columns = [c[0] if isinstance(c, tuple) else c for c in px.columns]
+            # 인덱스 이름이 Datetime으로 나올 수 있으므로 Date로 통일
+            if "Datetime" in px.columns:
+                px = px.rename(columns={"Datetime": "Date"})
+                
             if "Close" in px.columns:
                 px = px.rename(columns={"Close": "Close Price"})
+                # Timezone 제거 후 Date로 통일
                 px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
                 return px.sort_values("Date").dropna(subset=["Close Price"]).reset_index(drop=True)[["Date", "Close Price"]]
     except Exception as e:
@@ -322,6 +328,7 @@ def fetch_etf_history(symbol: str, start_date: str, end_date: str) -> pd.DataFra
             return px[mask].sort_values("Date").reset_index(drop=True)
     except Exception:
         pass
+    
     return empty
 
 # ═══════════════════════════════════════════════════════════════════
