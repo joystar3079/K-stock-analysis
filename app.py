@@ -4,10 +4,8 @@
 수학 연산과 판정 로직은 완벽히 분리되어 다른 파일에서 불러옵니다.
 새창 열기 동기화 우회, 퀵링크, 우측 쌍둥이 버튼 정렬, 마스터 최신 다운로드 기능이 적용되었습니다.
 
-[V30] 야후 파이낸스 차단 무관 운영
-  · 옵션 체인: 엑셀/CSV 업로드 경로가 기본, 야후 자동수집은 보조
-  · 시세: 야후 → stooq 자동 폴백, 둘 다 막히면 시세 파일 업로드로 대체
-  · 자동 인식 실패 시 종가·기준일·SOFR 를 수동 보정할 수 있는 입력란 제공
+[V30 경량화 버전] 옵션 체인 및 시세 파일 수동 업로드/보정 기능 전면 삭제
+  · 오직 야후(Yahoo) API → stooq 자동 폴백을 통한 순수 자동 수집 모드로만 동작합니다.
 """
 from __future__ import annotations
 
@@ -27,25 +25,15 @@ from data_io import (diagnose_quote_date, extract_daily_options,
                      fetch_etf_history, load_master_data, merge_master,
                      merge_report, push_master_to_github)
 
-# ── V30 신규 함수 ────────────────────────────────────────────────────
-# 저장소에 구버전 data_io.py 가 남아 있어도 앱 전체가 죽지 않도록 방어합니다.
-# (ImportError 로 앱이 통째로 멈추면 원인 파악이 어렵기 때문입니다.)
+# ── 구버전 data_io.py 연동 오류 방어 ──────────────────────────────────────
 try:
     from data_io import (DOWNLOAD_FOLDER, auto_update_master, build_filename,
-                         extract_options_from_file, extract_options_from_files,
-                         latest_data_date, load_price_history_from_file,
-                         master_summary, merge_many, save_to_local_folder,
+                         latest_data_date, master_summary, merge_many, save_to_local_folder,
                          to_csv_bytes, to_zip_bytes)
     IO_OK, IO_ERR = True, ""
 except ImportError as _e:
     IO_OK, IO_ERR = False, str(_e)
-    # 파서 계열은 대체 불가 — 업로드 경로만 비활성화합니다.
-    extract_options_from_file = None
-    extract_options_from_files = None
-    load_price_history_from_file = None
-
     # 아래는 순수 유틸이라 앱 안에서 그대로 재현합니다.
-    # 구버전 data_io.py 가 올라가 있어도 다운로드·병합은 계속 동작합니다.
     DOWNLOAD_FOLDER = "EWY Option"
 
     def latest_data_date(*frames):
@@ -224,7 +212,6 @@ st.session_state.setdefault("analysis_history", [])
 st.session_state.setdefault("master_version", "")
 st.session_state.setdefault("merge_policy", "skip")
 st.session_state.setdefault("edit_links_mode", False)
-st.session_state.setdefault("price_history_override", None)
 
 if "quick_links" not in st.session_state:
     st.session_state["quick_links"] = load_quick_links()
@@ -283,17 +270,10 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
     if master_df.empty:
         return pd.DataFrame(), meta
 
-    # 시세: 업로드 파일이 있으면 최우선, 없으면 야후 → stooq 폴백
+    # 시세: 야후 → stooq 폴백
     end_date = (datetime.today() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-    px = st.session_state.get("price_history_override")
-    if px is not None and not px.empty:
-        meta["price_source"] = "업로드 파일"
-        mask = ((px["Date"] >= pd.to_datetime(PRICE_HISTORY_START))
-                & (px["Date"] <= pd.to_datetime(end_date)))
-        px = px[mask].reset_index(drop=True)
-    else:
-        px = fetch_etf_history(SYMBOL, PRICE_HISTORY_START, end_date)
-        meta["price_source"] = "야후/stooq"
+    px = fetch_etf_history(SYMBOL, PRICE_HISTORY_START, end_date)
+    meta["price_source"] = "야후/stooq"
 
     if px is None or px.empty:
         meta["price_error"] = True
@@ -310,7 +290,7 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
     meta["n_dates"] = len(df)
     return df, meta
 
-def store_extraction(df_ext, stats, file_results=None) -> None:
+def store_extraction(df_ext, stats) -> None:
     """추출 결과를 세션에 담고, 자동 반영이 켜져 있으면 GitHub 마스터까지 갱신합니다.
 
     저장 위치는 config 의 MASTER_FILE 로 고정이라 폴더를 고를 필요가 없습니다.
@@ -321,7 +301,6 @@ def store_extraction(df_ext, stats, file_results=None) -> None:
         st.session_state.pop(k, None)
     st.session_state["recent_extracted_data"] = df_ext
     st.session_state["extract_stats"] = stats
-    st.session_state["file_results"] = file_results
 
     if not st.session_state.get("auto_push", False):
         return
@@ -418,143 +397,35 @@ with st.sidebar:
         st.error(
             f"⚠️ **data_io.py 가 구버전입니다** ({IO_VERSION})\n\n"
             "저장소의 `data_io.py` 를 최신 파일로 교체한 뒤 앱을 재부팅하세요. "
-            "그 전까지는 파일 업로드 경로만 막히고, 야후 수집·다운로드·누적 병합은 "
-            "그대로 동작합니다.")
+            "그 전까지는 야후 수집·다운로드·누적 병합만 제한적으로 동작합니다.")
         with st.expander("상세 오류"):
             st.code(IO_ERR)
-        source_mode = "🌐 야후 자동 수집"
-    else:
-        source_mode = st.radio(
-            "수집 방식",
-            ("📁 엑셀/CSV 업로드", "🌐 야후 자동 수집"),
-            label_visibility="collapsed", key="source_mode",
-            help="야후가 차단된 서버에서는 업로드 경로를 사용하세요. 산출 결과는 동일합니다.")
 
     st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영 (`{MASTER_FILE}`)",
                 value=True, key="auto_push",
                 help="추출/변환이 끝나면 곧바로 GitHub 마스터에 병합·커밋합니다. "
                      "중복 날짜는 기존 기록을 유지(skip)하므로 덮어쓸 위험이 없습니다.")
 
-    # ── 경로 A: 파일 업로드 (야후 차단과 무관) ─────────────────────
-    if IO_OK and source_mode.startswith("📁"):
-        up_files = st.file_uploader(
-            "옵션 체인 파일", type=["csv", "xlsx", "xls", "xlsm"],
-            accept_multiple_files=True,
-            label_visibility="collapsed", key="chain_uploader")
-        st.caption("CBOE 원본(콜·풋 한 행) · 일반 롱 포맷 · 컬럼명 변형 자동 인식")
-        if up_files:
-            st.caption(f"선택된 파일 {len(up_files)}개 — 여러 날짜를 한 번에 누적 병합합니다.")
-
-        with st.expander("⚙️ 수동 보정 (자동 인식 실패 시)"):
-            use_price = st.checkbox("기초자산 종가 직접 입력", key="use_manual_price")
-            manual_price = st.number_input(
-                f"{SYMBOL} 종가 ($)", min_value=0.0, value=0.0, step=0.01,
-                format="%.2f", disabled=not use_price, key="manual_price")
-
-            use_date = st.checkbox("기준일 직접 지정", key="use_manual_date")
-            manual_date = st.date_input(
-                "기준일 (Quote Date)", datetime.today(),
-                disabled=not use_date, key="manual_qdate")
-
-            use_sofr = st.checkbox("SOFR 직접 입력", key="use_manual_sofr")
-            manual_sofr = st.number_input(
-                "SOFR (%)", min_value=0.0, value=float(DEFAULT_SOFR), step=0.01,
-                format="%.2f", disabled=not use_sofr, key="manual_sofr")
-
-        if st.button("📄 업로드 파일 변환", type="primary",
-                     use_container_width=True, disabled=not up_files):
-            kw = dict(
-                etf_price=(manual_price if use_price and manual_price > 0 else None),
-                quote_date=(manual_date if use_date else None),
-                sofr=(manual_sofr if use_sofr else None),
-            )
-
-            # 파일 1개 — 기존 경로 그대로
-            if len(up_files) == 1:
-                with st.spinner("파일 파싱 및 IV/Delta 벡터 연산 중..."):
-                    df_ext, err, stats = extract_options_from_file(
-                        up_files[0], filename=getattr(up_files[0], "name", None), **kw)
-                file_results = None
-
-            # 파일 여러 개 — 각각 변환 후 하나로 누적 병합
-            else:
-                if use_date:
-                    st.warning("여러 파일에 같은 기준일을 강제하면 서로 덮어씁니다. "
-                               "'기준일 직접 지정'을 끄고 다시 시도하세요.")
-                with st.spinner(f"{len(up_files)}개 파일 변환 및 누적 병합 중..."):
-                    df_ext, file_results = extract_options_from_files(up_files, **kw)
-                fails = [r for r in file_results if r["error"]]
-                err = None if df_ext is not None else "모든 파일의 변환이 실패했습니다."
-                stats = {
-                    "source": "file",
-                    "file_count": len(up_files),
-                    "failed_files": [f"{r['filename']}: {r['error']}" for r in fails],
-                    "quote_date": (latest_data_date(df_ext) if df_ext is not None else None),
-                    "total_rows": 0 if df_ext is None else len(df_ext),
-                    "priced_rows": sum(r["priced_rows"] for r in file_results),
-                    "loaded_dates": sorted(
-                        {str(r["quote_date"]) for r in file_results if r["quote_date"]}),
-                }
-                if stats["quote_date"] is not None:
-                    stats["quote_date"] = pd.Timestamp(stats["quote_date"]).date()
-
-            if err:
-                st.error(err)
-                st.session_state["extract_error_stats"] = stats
-                st.session_state["extract_error_msg"] = err
-            else:
-                with st.spinner("GitHub 마스터에 자동 반영 중..."):
-                    store_extraction(df_ext, stats, file_results)
-                st.rerun()
-
-    # ── 경로 B: 야후 자동 수집 (보조) ──────────────────────────────
-    else:
-        st.caption("서버 IP가 차단되면 실패할 수 있습니다. 실패 시 업로드 경로를 쓰세요.")
-        if st.button("Daily 옵션데이터 추출", use_container_width=True):
-            with st.spinner("옵션 체인 수집 및 IV/Delta 벡터 연산 중..."):
-                df_ext, err, stats = extract_daily_options()
-            if err:
-                st.error(err)
-                st.session_state["extract_error_stats"] = stats
-                st.session_state["extract_error_msg"] = err
-            else:
-                with st.spinner("GitHub 마스터에 자동 반영 중..."):
-                    store_extraction(df_ext, stats)
-                st.rerun()
+    # ── 야후 자동 수집 (단일 경로) ──────────────────────────────
+    st.caption("🌐 야후 API를 통해 데일리 옵션 체인을 수집합니다.")
+    if st.button("Daily 옵션데이터 추출", type="primary", use_container_width=True):
+        with st.spinner("옵션 체인 수집 및 IV/Delta 벡터 연산 중..."):
+            df_ext, err, stats = extract_daily_options()
+        if err:
+            st.error(err)
+            st.session_state["extract_error_stats"] = stats
+            st.session_state["extract_error_msg"] = err
+        else:
+            with st.spinner("GitHub 마스터에 자동 반영 중..."):
+                store_extraction(df_ext, stats)
+            st.rerun()
 
     if "recent_extracted_data" in st.session_state:
         if st.button("↩️ 추출본 버리기 (마스터만 사용)", use_container_width=True):
-            for k in ("recent_extracted_data", "extract_stats", "file_results",
+            for k in ("recent_extracted_data", "extract_stats",
                       "accumulated_preview", "accumulated_steps"):
                 st.session_state.pop(k, None)
             st.rerun()
-
-    # ── 시세 폴백 ────────────────────────────────────────────────
-    if IO_OK:
-        with st.expander("📉 시세 파일 (야후 시세까지 막힐 때)"):
-            px_now = st.session_state.get("price_history_override")
-            if px_now is not None and not px_now.empty:
-                st.success(f"적용 중 — {len(px_now):,}일 "
-                           f"({px_now['Date'].min():%Y-%m-%d} ~ {px_now['Date'].max():%Y-%m-%d})")
-                if st.button("시세 파일 해제", use_container_width=True):
-                    st.session_state["price_history_override"] = None
-                    st.rerun()
-            else:
-                px_file = st.file_uploader(
-                    f"{SYMBOL} 일봉 (Date / Close 컬럼)",
-                    type=["csv", "xlsx", "xls"], key="px_uploader")
-                if px_file is not None and st.button("시세 적용", use_container_width=True):
-                    try:
-                        px_df = load_price_history_from_file(
-                            px_file, getattr(px_file, "name", None))
-                    except Exception as e:
-                        px_df = pd.DataFrame()
-                        st.error(f"시세 파일 읽기 실패: {e}")
-                    if px_df.empty:
-                        st.error("Date / Close 컬럼을 찾지 못했습니다.")
-                    else:
-                        st.session_state["price_history_override"] = px_df
-                        st.rerun()
 
     st.divider()
     engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
@@ -586,14 +457,6 @@ if st.session_state.get("extract_error_stats") is not None:
     with st.expander("🩺 수집 실패 진단 — 파일에서 무엇을 읽었는지 확인", expanded=True):
         est = st.session_state["extract_error_stats"]
         st.error(st.session_state.get("extract_error_msg", "수집에 실패했습니다."))
-        cols = est.get("detected_columns")
-        if cols:
-            st.write("**인식된 컬럼:** " + ", ".join(str(c) for c in cols))
-            st.caption("Strike / Expiration Date / Option Type 중 빠진 게 있으면 "
-                       "원본 파일의 헤더를 확인하거나 수동 보정 입력란을 사용하세요.")
-        else:
-            st.caption("헤더 자체를 찾지 못했습니다. 파일 상단의 안내문이 너무 길거나 "
-                       "옵션 체인이 아닌 시트일 수 있습니다.")
         st.json(est)
 
 if "recent_extracted_data" in st.session_state:
@@ -601,31 +464,11 @@ if "recent_extracted_data" in st.session_state:
     stats = st.session_state.get("extract_stats", {})
     total = stats.get("total_rows", len(df_ext))
     priced = stats.get("priced_rows", 0)
-    src_label = "📁 업로드 파일" if stats.get("source") == "file" else "🌐 야후 API"
+    src_label = "🌐 야후 API"
     price_txt = stats.get("etf_price", "-")
     st.success(f"✅ 연산 완료 [{src_label}] — 전체 {total:,}행 중 유동성 있는 {priced:,}행만 IV 계산 "
                f"(기준일 {stats.get('quote_date', '-')}, {SYMBOL} ${price_txt}, "
                f"SOFR {stats.get('sofr', '-')}%)")
-
-    if stats.get("file_count"):
-        st.info(f"📚 {stats['file_count']}개 파일 누적 병합 — "
-                f"수록 날짜 {len(stats.get('loaded_dates', []))}일 "
-                f"({', '.join(stats.get('loaded_dates', [])[:6])}"
-                f"{' …' if len(stats.get('loaded_dates', [])) > 6 else ''})")
-    if stats.get("failed_files"):
-        st.warning("변환 실패 파일:\n\n" +
-                   "\n\n".join(f"· {x}" for x in stats["failed_files"]))
-
-    if stats.get("multi_quote_dates"):
-        st.warning(
-            f"⚠️ 업로드 파일에 날짜가 여러 개 섞여 있습니다 "
-            f"({', '.join(str(d) for d in stats['multi_quote_dates'])}). "
-            f"가장 최근 날짜 **{stats.get('quote_date')}** 만 사용했습니다. "
-            "다른 날짜를 쓰려면 사이드바의 '기준일 직접 지정'으로 골라 다시 변환하세요.")
-
-    if stats.get("price_source"):
-        st.caption(f"기초자산 종가 출처: {stats['price_source']} "
-                   "(파일에 종가 컬럼이 없어 외부에서 보충했습니다)")
 
     filled_iv = stats.get("filled_from_file_Implied Volatility", 0)
     if filled_iv:
@@ -756,23 +599,6 @@ if "recent_extracted_data" in st.session_state:
             except Exception as e:
                 st.error(f"저장 실패: {e}")
 
-    # ── 파일별 변환 결과 (다중 업로드 시) ──────────────────────────
-    file_results = st.session_state.get("file_results")
-    if file_results:
-        with st.expander(f"📋 파일별 변환 결과 ({len(file_results)}개)"):
-            st.dataframe(
-                pd.DataFrame([{
-                    "파일": r["filename"],
-                    "기준일": r["quote_date"] or "-",
-                    "행수": r["rows"],
-                    "IV 산출": r["priced_rows"],
-                    "결과": "실패: " + r["error"] if r["error"] else "정상",
-                } for r in file_results]),
-                use_container_width=True, hide_index=True)
-
-    if stats.get("skipped_expirations"):
-        st.warning(f"수집 실패 만기: {', '.join(stats['skipped_expirations'][:5])}")
-
     with st.expander("🔬 날짜 구성 진단 — 마스터 vs 추출본 비교"):
         diag_date = st.date_input(
             "진단할 날짜",
@@ -787,7 +613,7 @@ if "recent_extracted_data" in st.session_state:
 
     st.divider()
     if st.button("🧹 작업 정리 (추출본 비우기)", use_container_width=True):
-        for k in ("recent_extracted_data", "extract_stats", "file_results",
+        for k in ("recent_extracted_data", "extract_stats",
                   "accumulated_preview", "accumulated_steps",
                   "push_result", "push_error"):
             st.session_state.pop(k, None)
@@ -802,8 +628,7 @@ if run_button:
                                            target_date, target_start, target_end)
     if result_df.empty:
         if meta.get("price_error"):
-            st.error("❌ 시세를 가져오지 못했습니다 (야후·stooq 모두 실패). "
-                     "사이드바 **📉 시세 파일** 에 일봉 CSV를 올린 뒤 다시 실행하세요.")
+            st.error("❌ 시세를 가져오지 못했습니다 (야후·stooq 모두 실패). API 일시적 오류일 수 있습니다.")
         else:
             st.error("❌ 조회 결과가 없습니다. 날짜 범위와 마스터 데이터를 확인하세요.")
     else:
@@ -814,7 +639,7 @@ if run_button:
 
         if meta.get("merged_extraction"):
             pol = "기존 유지" if meta.get("merge_policy") == "skip" else "새 추출본으로 교체"
-            st.info(f"💡 업로드 전 추출본이 결합되었습니다 (중복 날짜 처리: {pol})")
+            st.info(f"💡 연산 전 추출본이 결합되었습니다 (중복 날짜 처리: {pol})")
 
         if meta.get("price_source"):
             st.caption(f"시세 출처: {meta['price_source']}")
