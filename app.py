@@ -1,9 +1,8 @@
 """EWY Quant Analytics V34 — Streamlit UI.
 
-[V34 파일 업로드 전용 경량화 & 100% API 독립 버전] 
-  · 야후 API 옵션 수집, 수동 보정, 시세 파일 업로드 기능 전면 제거.
-  · 코랩 등에서 추출된 완성형 CSV/Excel 파일을 업로드하는 방식으로 통일.
-  · [혁신] 시세 데이터마저 야후/stooq에 의존하지 않고 마스터 파일 내장 주가를 자체 추출하여 사용 (차단 100% 면역)
+[V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
+  · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
+  · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ from datetime import datetime
 import base64
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 from github import Github
 
@@ -26,6 +26,9 @@ from data_io import (DOWNLOAD_FOLDER, auto_update_master, build_filename,
 from features import aggregate_oi_features, attach_price
 from phases import assign_phases
 from presenters import add_display_columns
+
+# 💡 신규 퀀트 모델 모듈 임포트
+from volume_analysis import run_volume_analysis
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V34", page_icon="📈", layout="wide")
@@ -125,8 +128,7 @@ def generate_new_window_link(df, title):
 # =====================================================================
 # [엔진 실행 코어]
 # =====================================================================
-def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
-    cfg = ENGINES[version]
+def get_ready_master() -> tuple[pd.DataFrame, dict]:
     meta: dict = {}
     master_df = load_master_data(st.session_state["master_version"])
     meta["master_rows"] = len(master_df)
@@ -141,17 +143,21 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
             master_df = merge_master(master_df, new, on_conflict=policy)
             meta["merged_extraction"] = True
         meta["merge_policy"] = policy
+    return master_df, meta
 
+def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
+    master_df, meta = get_ready_master()
     if master_df.empty: return pd.DataFrame(), meta
 
-    # 💡 [핵심 혁신] 외부 API(야후/stooq) 통신 완전 폐기! 
+    cfg = ENGINES[version]
+
     # 마스터 파일 내부의 'Quote Date'와 'EWY Price'를 추출하여 자체 시세표(px) 생성
     if "EWY Price" in master_df.columns:
         px = master_df[["Quote Date", "EWY Price"]].drop_duplicates(subset=["Quote Date"]).copy()
         px.rename(columns={"Quote Date": "Date", "EWY Price": "Close Price"}, inplace=True)
         px["Date"] = pd.to_datetime(px["Date"]).dt.tz_localize(None).dt.normalize()
         px = px.sort_values("Date").dropna(subset=["Close Price"]).reset_index(drop=True)
-        meta["price_source"] = "마스터 파일 내장 시세 (API 독립 / 완전 오프라인 모드)"
+        meta["price_source"] = "마스터 파일 내장 시세 (오프라인 모드)"
     else:
         meta["price_error"] = True
         return pd.DataFrame(), meta
@@ -186,29 +192,13 @@ def store_extraction(df_ext, stats, file_results=None) -> None:
     except Exception as e:
         st.session_state["push_error"] = str(e)
 
-def run_quant_engine(version: str, mode: str, target_date=None, target_start=None, target_end=None) -> tuple[pd.DataFrame, dict]:
-    df, meta = build_full_frame(version)
-    if df.empty: return pd.DataFrame(), meta
-    if mode == "구간 조회" and target_start and target_end:
-        sel = df[(df["Date"] >= pd.to_datetime(target_start)) & (df["Date"] <= pd.to_datetime(target_end))].copy()
-    elif mode == "타임머신 (특정일)" and target_date:
-        sel = df[df["Date"] <= pd.to_datetime(target_date)].tail(10).copy()
-    else:
-        sel = df.tail(10).copy()
-    if sel.empty: return pd.DataFrame(), meta
-    meta["anchor_date"] = sel["Date"].max()
-    sel = sel[DISPLAY_COLS].copy()
-    sel["Date"] = sel["Date"].dt.strftime("%m/%d")
-    sel["Close Price"] = sel["Close Price"].round(2)
-    return sel.rename(columns={"Close Price": f"{SYMBOL}($)", "Phase": "현재 시장 국면 진단"}), meta
-
 # =====================================================================
 # [상단 UI]
 # =====================================================================
 col_header, col_links = st.columns([0.65, 0.35])
 with col_header:
     st.title(f"📈 {SYMBOL} Quant Analytics V34")
-    st.markdown("**3-in-1 다중 전략 엔진 · 100% 완전 오프라인 모드 탑재**")
+    st.markdown("**쌍방향 퀀트 엔진 & 거래량 마이크로스트럭처 분석 시스템**")
 
 with col_links:
     h1, h2 = st.columns([0.85, 0.15])
@@ -244,15 +234,23 @@ with col_links:
 st.divider()
 
 # =====================================================================
-# [사이드바]
+# [사이드바] 모듈 및 데이터 관리
 # =====================================================================
 with st.sidebar:
-    st.markdown("#### ⛁ 데이터 관리")
-    st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영 (`{MASTER_FILE}`)", value=True, key="auto_push", help="추출/변환이 끝나면 곧바로 GitHub 마스터에 병합·커밋합니다.")
+    # 💡 신규 기능: 모듈 선택 라디오 버튼
+    st.markdown("#### 🛠️ 분석 모듈 선택")
+    module_selection = st.radio(
+        "사용할 엔진을 선택하세요.",
+        ["옵션 가격(방어벽) 분석", "옵션 거래량(레짐) 분석"],
+        label_visibility="collapsed"
+    )
+    st.divider()
 
-    # ── 경로: 파일 업로드 전용 ─────────────────────
+    st.markdown("#### ⛁ 데이터 관리")
+    st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영 (`{MASTER_FILE}`)", value=True, key="auto_push")
+
     up_files = st.file_uploader("📁 옵션 분석데이터 (CSV/Excel) 업로드", type=["csv", "xlsx", "xls"], accept_multiple_files=True, label_visibility="collapsed")
-    st.caption("로컬/코랩 환경에서 생성한 완성형 CSV 파일을 여기에 드래그 앤 드롭 하세요.")
+    st.caption("로컬/코랩 환경에서 생성한 완성형 CSV 파일을 드래그 앤 드롭 하세요.")
     
     if up_files:
         st.caption(f"선택된 파일 {len(up_files)}개 — 마스터에 누적 병합됩니다.")
@@ -285,31 +283,43 @@ with st.sidebar:
             st.rerun()
 
     if "recent_extracted_data" in st.session_state:
-        if st.button("↩️ 추출본 버리기 (마스터만 사용)", use_container_width=True):
+        if st.button("↩️️ 추출본 버리기 (마스터만 사용)", use_container_width=True):
             for k in ("recent_extracted_data", "extract_stats", "file_results", "push_result", "push_error"):
                 st.session_state.pop(k, None)
             st.rerun()
 
     st.divider()
-    engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
-
-    st.divider()
-    st.markdown("#### ◱ 분석 모드")
-    mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석", "타임머신 (특정일)", "구간 조회"), label_visibility="collapsed")
-
-    target_date = target_start = target_end = None
-    if mode_selection == "타임머신 (특정일)":
-        target_date = st.date_input("기준일 선택", datetime.today())
-    elif mode_selection == "구간 조회":
-        c1, c2 = st.columns(2)
-        with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
-        with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
+    
+    # 모듈에 따른 동적 UI 분기
+    if module_selection == "옵션 가격(방어벽) 분석":
+        st.markdown("#### ⚙️ 파라미터 버전")
+        engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
+        st.divider()
+        st.markdown("#### ◱ 분석 모드")
+        mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석", "타임머신 (특정일)", "구간 조회"), label_visibility="collapsed")
+        target_date = target_start = target_end = None
+        if mode_selection == "타임머신 (특정일)":
+            target_date = st.date_input("기준일 선택", datetime.today())
+        elif mode_selection == "구간 조회":
+            c1, c2 = st.columns(2)
+            with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
+            with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
+    else:
+        # 거래량 레짐 분석용 UI
+        st.markdown("#### ◱ 분석 모드 (거래량 레짐)")
+        mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석 (15일)", "구간 조회"), label_visibility="collapsed")
+        target_date = target_start = target_end = None
+        if mode_selection == "구간 조회":
+            c1, c2 = st.columns(2)
+            with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
+            with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
 
     run_button = st.button("🚀 분석 엔진 가동", type="primary", use_container_width=True)
     st.caption(f"data_io: {IO_VERSION}")
 
+
 # =====================================================================
-# [결과 화면 1] 추출 완료 + 마스터 현황
+# [결과 화면 1] 추출 완료 + 마스터 현황 (모듈 공통)
 # =====================================================================
 if st.session_state.get("extract_error_stats") is not None:
     with st.expander("🩺 수집 실패 진단", expanded=True):
@@ -376,42 +386,89 @@ if "recent_extracted_data" in st.session_state:
     st.divider()
 
 # =====================================================================
-# [결과 화면 2] 분석 실행
+# [결과 화면 2] 분석 모듈별 실행 로직
 # =====================================================================
 if run_button:
-    with st.spinner(f"[{engine_version}] 연산 중..."):
-        result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
-    if result_df.empty:
-        if meta.get("price_error"): st.error("❌ 기초자산 시세(EWY Price) 정보를 찾지 못했습니다. 마스터 파일 데이터를 확인하세요.")
-        else: st.error("❌ 조회 결과가 없습니다. 마스터 데이터를 확인하세요.")
-    else:
-        anchor = meta.get("anchor_date")
-        anchor_str = pd.to_datetime(anchor).strftime("%Y-%m-%d") if anchor is not None else "-"
-        st.success(f"✅ 연산 완료 ({mode_selection}) · **기준일 {anchor_str}** · 누적 {meta.get('n_dates', 0)}일")
-        if meta.get("merged_extraction"):
-            st.info(f"💡 연산 전 방금 올린 데이터가 결합되었습니다.")
+    
+    if module_selection == "옵션 가격(방어벽) 분석":
+        with st.spinner(f"[{engine_version}] 가격 모델 연산 중..."):
+            result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
+        
+        if result_df.empty:
+            if meta.get("price_error"): st.error("❌ 기초자산 시세(EWY Price) 정보를 찾지 못했습니다. 마스터 파일 데이터를 확인하세요.")
+            else: st.error("❌ 조회 결과가 없습니다. 마스터 데이터를 확인하세요.")
+        else:
+            anchor = meta.get("anchor_date")
+            anchor_str = pd.to_datetime(anchor).strftime("%Y-%m-%d") if anchor is not None else "-"
+            st.success(f"✅ 가격 모델 완료 ({mode_selection}) · **기준일 {anchor_str}** · 누적 {meta.get('n_dates', 0)}일")
             
-        if meta.get("price_source"):
-            st.caption(f"시세 출처: {meta['price_source']}")
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            detail = mode_selection
+            if mode_selection == "타임머신 (특정일)": detail += f" ({target_date})"
+            elif mode_selection == "구간 조회": detail += f" ({target_start} ~ {target_end})"
 
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        detail = mode_selection
-        if mode_selection == "타임머신 (특정일)": detail += f" ({target_date})"
-        elif mode_selection == "구간 조회": detail += f" ({target_start} ~ {target_end})"
+            st.session_state["analysis_history"].insert(0, {
+                "id": uuid.uuid4().hex[:8],
+                "title": f"📌 [{stamp}] 가격(방어벽) 엔진 - {engine_version} | {detail}",
+                "data": result_df,
+            })
+            st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
-        st.session_state["analysis_history"].insert(0, {
-            "id": uuid.uuid4().hex[:8],
-            "title": f"📌 [{stamp}] {engine_version} | {detail} | 기준일 {anchor_str}",
-            "data": result_df,
-        })
-        st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
+    else:
+        # 💡 옵션 거래량(레짐) 분석 모듈 실행
+        with st.spinner("거래량 마이크로스트럭처 레짐 연산 중..."):
+            master_df, meta = get_ready_master()
+            if master_df.empty:
+                st.error("❌ 마스터 데이터가 비어있습니다. 파일을 업로드해주세요.")
+            else:
+                vol_df = run_volume_analysis(master_df)
+                
+                if vol_df.empty:
+                    st.error("❌ 거래량 모델 연산 실패 (데이터 부족)")
+                else:
+                    if mode_selection == "구간 조회" and target_start and target_end:
+                        sel = vol_df[(vol_df["Quote Date"] >= pd.to_datetime(target_start)) & (vol_df["Quote Date"] <= pd.to_datetime(target_end))].copy()
+                    else:
+                        # "최근 시그널분석 (15일)"
+                        sel = vol_df.tail(15).copy()
+
+                    if sel.empty:
+                        st.warning("⚠️ 선택하신 기간에 데이터가 없습니다.")
+                    else:
+                        # UI 출력용 컬럼 정리 및 포맷팅
+                        cols_to_show = ['Quote Date', 'EWY_Price', 'DD_10', 'Pos_20D', 'Backwardation_Flag', 'Put_Skew_진단', 'Regime']
+                        out_df = sel[cols_to_show].copy()
+                        
+                        anchor = out_df["Quote Date"].max()
+                        anchor_str = pd.to_datetime(anchor).strftime("%Y-%m-%d")
+                        
+                        out_df['Quote Date'] = out_df['Quote Date'].dt.strftime('%m-%d')
+                        out_df['EWY_Price'] = out_df['EWY_Price'].round(2)
+                        
+                        out_df['DD_10'] = out_df['DD_10'].replace([np.inf, -np.inf], np.nan).fillna(0.0).round(1).astype(str) + '%'
+                        out_df['Pos_20D'] = (out_df['Pos_20D'].replace([np.inf, -np.inf], np.nan).fillna(0.5) * 100).round(0).astype(int).astype(str) + '%'
+                        
+                        out_df = out_df.rename(columns={'Quote Date': 'Date', 'EWY_Price': f'{SYMBOL}($)', 'Backwardation_Flag': 'Backward(역조)'})
+
+                        st.success(f"✅ 거래량 레짐 모델 완료 ({mode_selection}) · **기준일 {anchor_str}**")
+
+                        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        detail = mode_selection
+                        if mode_selection == "구간 조회": detail += f" ({target_start} ~ {target_end})"
+
+                        st.session_state["analysis_history"].insert(0, {
+                            "id": uuid.uuid4().hex[:8],
+                            "title": f"📊 [{stamp}] 거래량(레짐) 엔진 - V28.4 | {detail}",
+                            "data": out_df,
+                        })
+                        st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
 # =====================================================================
 # [결과 화면 3] 히스토리
 # =====================================================================
 if st.session_state["analysis_history"]:
     st.divider()
-    st.header(f"📊 분석 결과 비교 히스토리 (최근 {MAX_HISTORY}건)")
+    st.header(f"🗂️ 분석 결과 비교 히스토리 (최근 {MAX_HISTORY}건)")
     for record in st.session_state["analysis_history"]:
         with st.container():
             st.markdown(f"**{record['title']}**")
