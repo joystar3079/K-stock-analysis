@@ -1,8 +1,10 @@
 """EWY Quant Analytics V34 — Streamlit UI.
 
-[V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
-  · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
-  · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
+[V34 파일 업로드 전용 경량화 & 100% API 독립 버전] 
+  · 야후 API 옵션 수집, 수동 보정, 시세 파일 업로드 기능 전면 제거.
+  · 코랩 등에서 추출된 완성형 CSV/Excel 파일을 업로드하는 방식으로 통일.
+  · 마스터 파일 내장 주가를 자체 추출하여 사용 (차단 100% 면역)
+  · [UI 개편] 사이드바 최상단에 메인 메뉴 3분할 탭(데이터관리 / 방어벽 / 레짐) 적용
 """
 from __future__ import annotations
 
@@ -26,8 +28,6 @@ from data_io import (DOWNLOAD_FOLDER, auto_update_master, build_filename,
 from features import aggregate_oi_features, attach_price
 from phases import assign_phases
 from presenters import add_display_columns
-
-# 💡 신규 퀀트 모델 모듈 임포트
 from volume_analysis import run_volume_analysis
 
 warnings.filterwarnings("ignore")
@@ -151,7 +151,7 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
 
     cfg = ENGINES[version]
 
-    # 마스터 파일 내부의 'Quote Date'와 'EWY Price'를 추출하여 자체 시세표(px) 생성
+    # 마스터 파일 내장 주가 자체 추출 (외부 API 독립)
     if "EWY Price" in master_df.columns:
         px = master_df[["Quote Date", "EWY Price"]].drop_duplicates(subset=["Quote Date"]).copy()
         px.rename(columns={"Quote Date": "Date", "EWY Price": "Close Price"}, inplace=True)
@@ -191,6 +191,22 @@ def store_extraction(df_ext, stats, file_results=None) -> None:
         load_master_data.clear()
     except Exception as e:
         st.session_state["push_error"] = str(e)
+
+def run_quant_engine(version: str, mode: str, target_date=None, target_start=None, target_end=None) -> tuple[pd.DataFrame, dict]:
+    df, meta = build_full_frame(version)
+    if df.empty: return pd.DataFrame(), meta
+    if mode == "구간 조회" and target_start and target_end:
+        sel = df[(df["Date"] >= pd.to_datetime(target_start)) & (df["Date"] <= pd.to_datetime(target_end))].copy()
+    elif mode == "타임머신 (특정일)" and target_date:
+        sel = df[df["Date"] <= pd.to_datetime(target_date)].tail(10).copy()
+    else:
+        sel = df.tail(10).copy()
+    if sel.empty: return pd.DataFrame(), meta
+    meta["anchor_date"] = sel["Date"].max()
+    sel = sel[DISPLAY_COLS].copy()
+    sel["Date"] = sel["Date"].dt.strftime("%m/%d")
+    sel["Close Price"] = sel["Close Price"].round(2)
+    return sel.rename(columns={"Close Price": f"{SYMBOL}($)", "Phase": "현재 시장 국면 진단"}), meta
 
 # =====================================================================
 # [상단 UI]
@@ -234,67 +250,71 @@ with col_links:
 st.divider()
 
 # =====================================================================
-# [사이드바] 모듈 및 데이터 관리
+# [사이드바] 메인 메뉴 및 동적 모듈 제어
 # =====================================================================
 with st.sidebar:
-    # 💡 신규 기능: 모듈 선택 라디오 버튼
-    st.markdown("#### 🛠️ 분석 모듈 선택")
-    module_selection = st.radio(
-        "사용할 엔진을 선택하세요.",
-        ["옵션 가격(방어벽) 분석", "옵션 거래량(레짐) 분석"],
+    st.markdown("### 📌 메인 메뉴")
+    main_menu = st.radio(
+        "메뉴 선택",
+        ["⛁ 데이터 관리", "🛡️ 옵션 가격(방어벽) 분석", "📊 옵션 거래량(레짐) 분석"],
         label_visibility="collapsed"
     )
     st.divider()
 
-    st.markdown("#### ⛁ 데이터 관리")
-    st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영 (`{MASTER_FILE}`)", value=True, key="auto_push")
-
-    up_files = st.file_uploader("📁 옵션 분석데이터 (CSV/Excel) 업로드", type=["csv", "xlsx", "xls"], accept_multiple_files=True, label_visibility="collapsed")
-    st.caption("로컬/코랩 환경에서 생성한 완성형 CSV 파일을 드래그 앤 드롭 하세요.")
+    run_button = False
     
-    if up_files:
-        st.caption(f"선택된 파일 {len(up_files)}개 — 마스터에 누적 병합됩니다.")
+    # ── [메뉴 1] 데이터 관리 ──────────────────────────────────────────
+    if main_menu == "⛁ 데이터 관리":
+        st.markdown("#### ⛁ 데이터 병합 및 관리")
+        st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
+        
+        up_files = st.file_uploader("📁 옵션 분석데이터 (CSV/Excel) 업로드", type=["csv", "xlsx", "xls"], accept_multiple_files=True, label_visibility="collapsed")
+        st.caption("로컬/코랩 환경에서 생성한 완성형 CSV 파일을 드래그 앤 드롭 하세요.")
+        
+        if up_files:
+            st.caption(f"선택된 파일 {len(up_files)}개 — 마스터에 누적 병합됩니다.")
 
-    if st.button("📄 업로드 파일 변환", type="primary", use_container_width=True, disabled=not up_files):
-        with st.spinner(f"{len(up_files)}개 파일 파싱 및 병합 중..."):
-            df_ext, file_results = extract_options_from_files(up_files)
-            
-        fails = [r for r in file_results if r["error"]]
-        err = None if df_ext is not None else "모든 파일의 파싱이 실패했습니다."
-        stats = {
-            "source": "file",
-            "file_count": len(up_files),
-            "failed_files": [f"{r['filename']}: {r['error']}" for r in fails],
-            "quote_date": (latest_data_date(df_ext) if df_ext is not None else None),
-            "total_rows": 0 if df_ext is None else len(df_ext),
-            "priced_rows": sum(r["priced_rows"] for r in file_results),
-            "loaded_dates": sorted({str(r["quote_date"]) for r in file_results if r["quote_date"]}),
-        }
-        if stats["quote_date"] is not None:
-            stats["quote_date"] = pd.Timestamp(stats["quote_date"]).date()
+        if st.button("📄 업로드 파일 변환", type="primary", use_container_width=True, disabled=not up_files):
+            with st.spinner(f"{len(up_files)}개 파일 파싱 및 병합 중..."):
+                df_ext, file_results = extract_options_from_files(up_files)
+                
+            fails = [r for r in file_results if r["error"]]
+            err = None if df_ext is not None else "모든 파일의 파싱이 실패했습니다."
+            stats = {
+                "source": "file",
+                "file_count": len(up_files),
+                "failed_files": [f"{r['filename']}: {r['error']}" for r in fails],
+                "quote_date": (latest_data_date(df_ext) if df_ext is not None else None),
+                "total_rows": 0 if df_ext is None else len(df_ext),
+                "priced_rows": sum(r["priced_rows"] for r in file_results),
+                "loaded_dates": sorted({str(r["quote_date"]) for r in file_results if r["quote_date"]}),
+            }
+            if stats["quote_date"] is not None:
+                stats["quote_date"] = pd.Timestamp(stats["quote_date"]).date()
 
-        if err:
-            st.error(err)
-            st.session_state["extract_error_stats"] = stats
-            st.session_state["extract_error_msg"] = err
-        else:
-            with st.spinner("GitHub 마스터에 자동 반영 중..."):
-                store_extraction(df_ext, stats, file_results)
-            st.rerun()
+            if err:
+                st.error(err)
+                st.session_state["extract_error_stats"] = stats
+                st.session_state["extract_error_msg"] = err
+            else:
+                with st.spinner("GitHub 마스터에 자동 반영 중..."):
+                    store_extraction(df_ext, stats, file_results)
+                st.rerun()
 
-    if "recent_extracted_data" in st.session_state:
-        if st.button("↩️️ 추출본 버리기 (마스터만 사용)", use_container_width=True):
-            for k in ("recent_extracted_data", "extract_stats", "file_results", "push_result", "push_error"):
-                st.session_state.pop(k, None)
-            st.rerun()
+        if "recent_extracted_data" in st.session_state:
+            if st.button("↩ 추출본 버리기 (마스터만 사용)", use_container_width=True):
+                for k in ("recent_extracted_data", "extract_stats", "file_results", "push_result", "push_error"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+                
+        st.caption(f"data_io: {IO_VERSION}")
 
-    st.divider()
-    
-    # 모듈에 따른 동적 UI 분기
-    if module_selection == "옵션 가격(방어벽) 분석":
-        st.markdown("#### ⚙️ 파라미터 버전")
+    # ── [메뉴 2] 옵션 가격(방어벽) 분석 ────────────────────────────────
+    elif main_menu == "🛡️ 옵션 가격(방어벽) 분석":
+        st.markdown("#### 🛡️ 가격 기반 방어벽 분석")
         engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
-        st.divider()
+        st.markdown("<br>", unsafe_allow_html=True)
+        
         st.markdown("#### ◱ 분석 모드")
         mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석", "타임머신 (특정일)", "구간 조회"), label_visibility="collapsed")
         target_date = target_start = target_end = None
@@ -304,93 +324,95 @@ with st.sidebar:
             c1, c2 = st.columns(2)
             with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
             with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
-    else:
-        # 거래량 레짐 분석용 UI
-        st.markdown("#### ◱ 분석 모드 (거래량 레짐)")
+            
+        run_button = st.button("🚀 가격 방어벽 엔진 가동", type="primary", use_container_width=True)
+
+    # ── [메뉴 3] 옵션 거래량(레짐) 분석 ────────────────────────────────
+    elif main_menu == "📊 옵션 거래량(레짐) 분석":
+        st.markdown("#### 📊 거래량 기반 레짐 분석")
         mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석 (15일)", "구간 조회"), label_visibility="collapsed")
         target_date = target_start = target_end = None
         if mode_selection == "구간 조회":
             c1, c2 = st.columns(2)
             with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
             with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
-
-    run_button = st.button("🚀 분석 엔진 가동", type="primary", use_container_width=True)
-    st.caption(f"data_io: {IO_VERSION}")
+            
+        run_button = st.button("🚀 거래량 레짐 엔진 가동", type="primary", use_container_width=True)
 
 
 # =====================================================================
-# [결과 화면 1] 추출 완료 + 마스터 현황 (모듈 공통)
+# [결과 화면 1] 추출 완료 + 마스터 현황 (데이터 관리 메뉴일 때만 표시)
 # =====================================================================
-if st.session_state.get("extract_error_stats") is not None:
-    with st.expander("🩺 수집 실패 진단", expanded=True):
-        st.error(st.session_state.get("extract_error_msg", "수집에 실패했습니다."))
-        st.json(st.session_state["extract_error_stats"])
+if main_menu == "⛁ 데이터 관리":
+    if st.session_state.get("extract_error_stats") is not None:
+        with st.expander("🩺 수집 실패 진단", expanded=True):
+            st.error(st.session_state.get("extract_error_msg", "수집에 실패했습니다."))
+            st.json(st.session_state["extract_error_stats"])
 
-if "recent_extracted_data" in st.session_state:
-    df_ext = st.session_state["recent_extracted_data"]
-    stats = st.session_state.get("extract_stats", {})
-    st.success(f"✅ 업로드 완료 — 전체 {stats.get('total_rows', len(df_ext)):,}행 적용 완료")
+    if "recent_extracted_data" in st.session_state:
+        df_ext = st.session_state["recent_extracted_data"]
+        stats = st.session_state.get("extract_stats", {})
+        st.success(f"✅ 업로드 완료 — 전체 {stats.get('total_rows', len(df_ext)):,}행 적용 완료")
 
-    if stats.get("failed_files"):
-        st.warning("변환 실패 파일:\n\n" + "\n\n".join(f"· {x}" for x in stats["failed_files"]))
+        if stats.get("failed_files"):
+            st.warning("변환 실패 파일:\n\n" + "\n\n".join(f"· {x}" for x in stats["failed_files"]))
 
-    master_info = load_master_data(st.session_state["master_version"])
-    rep = merge_report(master_info, df_ext)
+        master_info = load_master_data(st.session_state["master_version"])
+        rep = merge_report(master_info, df_ext)
 
-    if rep["conflict_dates"]:
-        st.warning(f"⚠️ 업로드된 날짜 **{', '.join(str(d) for d in rep['conflict_dates'])}** 가 이미 마스터에 존재합니다.")
-        policy_label = st.radio("중복 날짜 처리", ("기존 기록 유지 (권장)", "새 추출본으로 통째 교체"), horizontal=True, key="policy_radio")
-        st.session_state["merge_policy"] = "skip" if policy_label.startswith("기존") else "replace"
-    else:
-        st.session_state["merge_policy"] = "skip"
-        if rep["new_dates"]:
-            st.info(f"🆕 마스터에 없는 새 날짜 추가 대기 중: {', '.join(str(d) for d in rep['new_dates'])}")
+        if rep["conflict_dates"]:
+            st.warning(f"⚠️ 업로드된 날짜 **{', '.join(str(d) for d in rep['conflict_dates'])}** 가 이미 마스터에 존재합니다.")
+            policy_label = st.radio("중복 날짜 처리", ("기존 기록 유지 (권장)", "새 추출본으로 통째 교체"), horizontal=True, key="policy_radio")
+            st.session_state["merge_policy"] = "skip" if policy_label.startswith("기존") else "replace"
+        else:
+            st.session_state["merge_policy"] = "skip"
+            if rep["new_dates"]:
+                st.info(f"🆕 마스터에 없는 새 날짜 추가 대기 중: {', '.join(str(d) for d in rep['new_dates'])}")
 
-    if not master_info.empty:
-        start_dt = master_info["Quote Date"].min().strftime("%Y-%m-%d")
-        end_dt = master_info["Quote Date"].max().strftime("%Y-%m-%d")
-        st.info(f"📅 **클라우드 누적 현황:** {start_dt} ~ {end_dt} ({len(master_info):,}행)")
+        if not master_info.empty:
+            start_dt = master_info["Quote Date"].min().strftime("%Y-%m-%d")
+            end_dt = master_info["Quote Date"].max().strftime("%Y-%m-%d")
+            st.info(f"📅 **클라우드 누적 현황:** {start_dt} ~ {end_dt} ({len(master_info):,}행)")
 
-    st.markdown("##### 📥 다운로드 및 병합")
-    data_date = latest_data_date(df_ext)
-    fn_latest = build_filename(data_date, "분석데이터")
-    csv_latest = to_csv_bytes(df_ext)
+        st.markdown("##### 📥 다운로드 및 병합")
+        data_date = latest_data_date(df_ext)
+        fn_latest = build_filename(data_date, "분석데이터")
+        csv_latest = to_csv_bytes(df_ext)
 
-    dl1, dl2 = st.columns(2)
-    dl1.download_button(f"📄 방금 올린 데이터 ({len(df_ext):,}행)", data=csv_latest, file_name=fn_latest, mime="text/csv", use_container_width=True)
-    dl2.download_button(f"🗂 {DOWNLOAD_FOLDER} 폴더 (zip)", data=to_zip_bytes({fn_latest: csv_latest}), file_name=build_filename(data_date, "분석데이터", "zip").replace(" 분석데이터", ""), mime="application/zip", use_container_width=True)
+        dl1, dl2 = st.columns(2)
+        dl1.download_button(f"📄 방금 올린 데이터 ({len(df_ext):,}행)", data=csv_latest, file_name=fn_latest, mime="text/csv", use_container_width=True)
+        dl2.download_button(f"🗂 {DOWNLOAD_FOLDER} 폴더 (zip)", data=to_zip_bytes({fn_latest: csv_latest}), file_name=build_filename(data_date, "분석데이터", "zip").replace(" 분석데이터", ""), mime="application/zip", use_container_width=True)
 
-    push_err = st.session_state.get("push_error")
-    push_res = st.session_state.get("push_result")
+        push_err = st.session_state.get("push_error")
+        push_res = st.session_state.get("push_result")
 
-    if push_err:
-        st.error(f"자동 반영 실패: {push_err}")
-    elif push_res:
-        b, a = push_res["before"], push_res["after"]
-        st.success(f"✅ 자동 반영 완료 — {b['rows']:,}행/{b['days']:,}일 → **{a['rows']:,}행/{a['days']:,}일** (+{push_res['added_rows']:,}행, +{push_res['added_days']}일)")
-    
-    policy = st.session_state["merge_policy"]
-    pol_txt = "기존 유지(skip)" if policy == "skip" else "새 파일로 덮어쓰기(replace)"
-    if st.button(f"🔁 지금 마스터에 반영 (정책: {pol_txt})", use_container_width=True):
-        with st.spinner("마스터 병합 및 GitHub 반영 중..."):
-            try:
-                st.session_state["push_result"] = auto_update_master(master_info, df_ext, on_conflict=policy)
-                st.session_state.pop("push_error", None)
-                st.session_state["master_version"] = uuid.uuid4().hex[:8]
-                load_master_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.session_state["push_error"] = str(e)
-                st.rerun()
+        if push_err:
+            st.error(f"자동 반영 실패: {push_err}")
+        elif push_res:
+            b, a = push_res["before"], push_res["after"]
+            st.success(f"✅ 자동 반영 완료 — {b['rows']:,}행/{b['days']:,}일 → **{a['rows']:,}행/{a['days']:,}일** (+{push_res['added_rows']:,}행, +{push_res['added_days']}일)")
+        
+        policy = st.session_state["merge_policy"]
+        pol_txt = "기존 유지(skip)" if policy == "skip" else "새 파일로 덮어쓰기(replace)"
+        if st.button(f"🔁 지금 마스터에 반영 (정책: {pol_txt})", use_container_width=True):
+            with st.spinner("마스터 병합 및 GitHub 반영 중..."):
+                try:
+                    st.session_state["push_result"] = auto_update_master(master_info, df_ext, on_conflict=policy)
+                    st.session_state.pop("push_error", None)
+                    st.session_state["master_version"] = uuid.uuid4().hex[:8]
+                    load_master_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.session_state["push_error"] = str(e)
+                    st.rerun()
 
-    st.divider()
 
 # =====================================================================
 # [결과 화면 2] 분석 모듈별 실행 로직
 # =====================================================================
 if run_button:
     
-    if module_selection == "옵션 가격(방어벽) 분석":
+    if main_menu == "🛡️ 옵션 가격(방어벽) 분석":
         with st.spinner(f"[{engine_version}] 가격 모델 연산 중..."):
             result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
         
@@ -414,12 +436,11 @@ if run_button:
             })
             st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
-    else:
-        # 💡 옵션 거래량(레짐) 분석 모듈 실행
+    elif main_menu == "📊 옵션 거래량(레짐) 분석":
         with st.spinner("거래량 마이크로스트럭처 레짐 연산 중..."):
             master_df, meta = get_ready_master()
             if master_df.empty:
-                st.error("❌ 마스터 데이터가 비어있습니다. 파일을 업로드해주세요.")
+                st.error("❌ 마스터 데이터가 비어있습니다. [⛁ 데이터 관리] 탭에서 파일을 업로드해주세요.")
             else:
                 vol_df = run_volume_analysis(master_df)
                 
@@ -429,13 +450,11 @@ if run_button:
                     if mode_selection == "구간 조회" and target_start and target_end:
                         sel = vol_df[(vol_df["Quote Date"] >= pd.to_datetime(target_start)) & (vol_df["Quote Date"] <= pd.to_datetime(target_end))].copy()
                     else:
-                        # "최근 시그널분석 (15일)"
                         sel = vol_df.tail(15).copy()
 
                     if sel.empty:
                         st.warning("⚠️ 선택하신 기간에 데이터가 없습니다.")
                     else:
-                        # UI 출력용 컬럼 정리 및 포맷팅
                         cols_to_show = ['Quote Date', 'EWY_Price', 'DD_10', 'Pos_20D', 'Backwardation_Flag', 'Put_Skew_진단', 'Regime']
                         out_df = sel[cols_to_show].copy()
                         
@@ -463,8 +482,9 @@ if run_button:
                         })
                         st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
+
 # =====================================================================
-# [결과 화면 3] 히스토리
+# [결과 화면 3] 히스토리 (메뉴 상관없이 항상 하단에 노출)
 # =====================================================================
 if st.session_state["analysis_history"]:
     st.divider()
