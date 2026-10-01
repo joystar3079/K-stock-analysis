@@ -3,7 +3,7 @@
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
-  · [오류 수정] 지표 설명자료 표(Table) 내부의 <br> 태그 렌더링 오류 수정 (순수 텍스트 포맷팅으로 교체)
+  · [UI 개선] 지표 설명자료에 히스토리 블록과 동일한 '삭제(닫기)' 버튼 디자인 적용
 """
 from __future__ import annotations
 
@@ -96,6 +96,7 @@ st.session_state.setdefault("analysis_history", [])
 st.session_state.setdefault("master_version", "")
 st.session_state.setdefault("merge_policy", "skip")
 st.session_state.setdefault("edit_links_mode", False)
+st.session_state.setdefault("show_vol_explanation", True)  # 💡 설명자료 노출 상태 변수
 
 if "quick_links" not in st.session_state:
     st.session_state["quick_links"] = load_quick_links()
@@ -106,10 +107,12 @@ def toggle_edit():
 def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [r for r in st.session_state["analysis_history"] if r["id"] != item_id]
 
-# 💡 [버그 수정] 표 내부의 <br> 태그를 제거하고 순수 마크다운 텍스트 디자인으로 교체
-VOLUME_EXPLANATION_MD = """
-### 📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)
+def hide_vol_explanation():
+    """💡 설명자료 닫기 버튼용 콜백 함수"""
+    st.session_state["show_vol_explanation"] = False
 
+# 💡 [디자인 수정] 분석 결과 블록과 동일한 스타일을 적용하기 위해 제목 분리
+VOLUME_EXPLANATION_MD = """
 #### 1. 산출 원리 (2단계 연산 구조)
 코드 내부에서는 다음 두 단계를 거쳐 **Put_Skew_Pct**를 산출합니다.
 
@@ -370,6 +373,7 @@ with st.sidebar:
             
         run_button = st.button("🚀 거래량 레짐 엔진 가동", type="primary", use_container_width=True)
 
+
 # =====================================================================
 # [결과 화면 1] 추출 완료 + 마스터 현황 (데이터 관리 메뉴일 때만 표시)
 # =====================================================================
@@ -441,7 +445,7 @@ if main_menu == "⛁ 데이터 관리":
 # =====================================================================
 if run_button:
     
-    if main_menu == "🛡️ 옵션 가격(방어벽) 분석":
+    if main_menu == "🛡️️ 옵션 가격(방어벽) 분석":
         with st.spinner(f"[{engine_version}] 가격 모델 연산 중..."):
             result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
         
@@ -467,6 +471,9 @@ if run_button:
             st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
     elif main_menu == "📊 옵션 거래량(레짐) 분석":
+        # 💡 거래량 분석 실행 시, 설명자료 노출 상태를 다시 True로 초기화
+        st.session_state["show_vol_explanation"] = True
+        
         with st.spinner("거래량 마이크로스트럭처 레짐 연산 중..."):
             master_df, meta = get_ready_master()
             if master_df.empty:
@@ -519,10 +526,18 @@ if run_button:
 if st.session_state["analysis_history"]:
     st.divider()
     
-    # 💡 히스토리에 거래량(레짐) 분석 기록이 단 하나라도 있으면,
-    # 새창을 띄우지 않고 히스토리 영역 바로 상단에 마크다운 설명자료를 직접 노출합니다.
-    if any(record.get("type") == "volume" for record in st.session_state["analysis_history"]):
-        st.markdown(VOLUME_EXPLANATION_MD)
+    # 💡 [핵심 구현] 거래량(레짐) 분석 기록이 있고, 사용자가 삭제(닫기)를 누르지 않았을 때 출력
+    has_volume_history = any(record.get("type") == "volume" for record in st.session_state["analysis_history"])
+    
+    if has_volume_history and st.session_state.get("show_vol_explanation", True):
+        with st.container():
+            st.markdown("**📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)**")
+            _, btn_col1, btn_col2 = st.columns([8, 1, 1])
+            with btn_col2:
+                # 설명자료 닫기(삭제) 버튼
+                st.button("❌ 삭제", key="del_vol_exp", on_click=hide_vol_explanation, use_container_width=True)
+            
+            st.markdown(VOLUME_EXPLANATION_MD)
         st.divider()
         
     st.header(f"🗂️ 분석 결과 비교 히스토리 (최근 {MAX_HISTORY}건)")
