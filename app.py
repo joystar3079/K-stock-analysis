@@ -3,7 +3,7 @@
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
-  · [신규] 옵션 거래량(레짐) 분석 결과 새창 열기 시 지표 설명자료(HTML) 자동 첨부
+  · [UI 개편] 거래량 레짐 분석 시 히스토리 상단에 지표 설명자료(HTML) 직접 노출
 """
 from __future__ import annotations
 
@@ -107,10 +107,11 @@ def toggle_edit():
 def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [r for r in st.session_state["analysis_history"] if r["id"] != item_id]
 
-# 💡 신규 기능: 거래량 레짐 분석 결과에 첨부될 설명자료 HTML 정의
+
+# 💡 거래량 레짐 분석 결과 상단에 띄울 지표 설명자료 HTML 정의
 VOLUME_EXPLANATION_HTML = """
-<div style="margin-top: 50px; padding: 25px; border: 1px solid #dcdde1; border-radius: 10px; background-color: #f5f6fa; text-align: left; line-height: 1.6;">
-    <h2 style="color: #2f3640; border-bottom: 2px solid #7f8fa6; padding-bottom: 10px;">📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)</h2>
+<div style="margin-bottom: 30px; padding: 25px; border: 1px solid #dcdde1; border-radius: 10px; background-color: #f5f6fa; text-align: left; line-height: 1.6;">
+    <h2 style="color: #2f3640; border-bottom: 2px solid #7f8fa6; padding-bottom: 10px; margin-top: 0;">📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)</h2>
     
     <h3 style="color: #273c75; margin-top: 25px;">1. 산출 원리 (2단계 연산 구조)</h3>
     <p>코드 내부에서는 다음 두 단계를 거쳐 <strong>Put_Skew_Pct</strong>를 산출합니다.</p>
@@ -123,17 +124,17 @@ VOLUME_EXPLANATION_HTML = """
         <li style="margin-bottom: 8px;"><strong>IV_{OTM Put} (외가격 풋옵션 IV):</strong> 현재 주가보다 5% 이상 낮은 행사가(Strike &le; Spot &times; 0.95)에 위치한 풋옵션들의 거래량 가중평균 내재변동성입니다. (급락에 베팅하거나 방어하려는 <i>'폭락 보험료'</i>)</li>
         <li><strong>IV_{ATM} (등가격 옵션 IV):</strong> 현재 주가 &plusmn; 5% 이내(0.95 &le; Strike/Spot &le; 1.05) 옵션들의 가중평균 내재변동성입니다. (시장의 <i>기본 변동성</i>)</li>
     </ul>
-    <p style="background-color: #e84118; color: white; padding: 10px; border-radius: 4px; font-weight: bold;">
+    <p style="background-color: #e84118; color: white; padding: 10px; border-radius: 4px; font-weight: bold; margin-bottom: 0;">
         💡 즉, Put_Skew가 클수록 시장 참여자들이 평상시 변동성 대비 하방 폭락 가능성에 훨씬 비싼 프리미엄(웃돈)을 지불하며 풋옵션을 사들이고 있음을 의미합니다.
     </p>
     
     <h4 style="color: #40739e; margin-top:30px;">② 60영업일 롤링 백분위 (Put_Skew_Pct) 변환:</h4>
     <p>시장의 기본 변동성 레벨은 시기마다 달라지므로 절대값만으로는 과열 여부를 판단하기 어렵습니다. 따라서 직전 <strong>60영업일(약 3개월)</strong> 동안의 Put_Skew 값들을 줄 세운 뒤, 오늘의 수치가 차지하는 순위를 백분율(0% ~ 100%)로 환산합니다.</p>
-    <p style="background-color: #44bd32; color: white; padding: 10px; border-radius: 4px;">
+    <p style="background-color: #44bd32; color: white; padding: 10px; border-radius: 4px; margin-bottom: 0;">
         📌 <strong>예시:</strong> Put_Skew_Pct = 95.0%라면, 최근 60영업일 중 오늘보다 풋옵션 웃돈이 더 비쌌던 날이 단 3일(상위 5%)뿐일 정도로 <strong>하방 헤지 수요가 극에 달했다는 뜻</strong>입니다.
     </p>
 
-    <h3 style="color: #273c75; margin-top: 50px;">2. 구간별 수치 해석 및 실전 매매 활용법</h3>
+    <h3 style="color: #273c75; margin-top: 40px;">2. 구간별 수치 해석 및 실전 매매 활용법</h3>
     <table style="width: 100%; border-collapse: collapse; margin-top: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
         <tr style="background-color: #353b48; color: white;">
             <th style="border: 1px solid #7f8fa6; padding: 12px; width: 18%;">Put_Skew_Pct 구간</th>
@@ -181,30 +182,23 @@ VOLUME_EXPLANATION_HTML = """
 </div>
 """
 
-def generate_new_window_link(df, title, is_volume_analysis=False):
+def generate_new_window_link(df, title):
     html_content = df.to_html(index=False, justify='center')
-    
-    # 거래량 분석일 경우 결과표 아래에 지표 설명자료 HTML을 결합
-    extra_html = VOLUME_EXPLANATION_HTML if is_volume_analysis else ""
-    
     html_template = f"""
     <!DOCTYPE html>
     <html><head><meta charset="utf-8"><title>{title}</title>
     <style>
-        body {{ font-family: 'Malgun Gothic', sans-serif; padding: 30px; color: #333; background-color: #ffffff; max-width: 1200px; margin: auto; }}
-        table {{ border-collapse: collapse; width: 100%; font-size: 14px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-        th, td {{ border: 1px solid #ddd; padding: 12px; }}
-        th {{ background-color: #2c3e50; color: white; font-weight: bold; font-size: 15px; }}
-        tr:nth-child(even) {{ background-color: #f8f9fa; }}
-        tr:hover {{ background-color: #f1f2f6; }}
+        body {{ font-family: 'Malgun Gothic', sans-serif; padding: 20px; color: #333; }}
+        table {{ border-collapse: collapse; width: 100%; font-size: 13px; text-align: center; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
     </style></head><body>
-    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px;">{title}</h2>
+    <h2>{title}</h2>
     {html_content}
-    {extra_html}
     </body></html>
     """
     b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8').replace('\n', '')
-    btn_html = f"""<a href="javascript:void(0);" onclick="var w=window.open('','_blank'); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">↗️ 새창 열기</a>"""
+    btn_html = f"""<a href="javascript:void(0);" onclick="var w=window.open(); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">↗️ 새창 열기</a>"""
     return btn_html
 
 # =====================================================================
@@ -494,7 +488,7 @@ if main_menu == "⛁ 데이터 관리":
 # =====================================================================
 if run_button:
     
-    if main_menu == "🛡️️ 옵션 가격(방어벽) 분석":
+    if main_menu == "🛡️ 옵션 가격(방어벽) 분석":
         with st.spinner(f"[{engine_version}] 가격 모델 연산 중..."):
             result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
         
@@ -515,7 +509,7 @@ if run_button:
                 "id": uuid.uuid4().hex[:8],
                 "title": f"📌 [{stamp}] 가격(방어벽) 엔진 - {engine_version} | {detail}",
                 "data": result_df,
-                "type": "price" # 식별자 추가
+                "type": "price" # 식별자
             })
             st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
@@ -562,7 +556,7 @@ if run_button:
                             "id": uuid.uuid4().hex[:8],
                             "title": f"📊 [{stamp}] 거래량(레짐) 엔진 - V28.4 | {detail}",
                             "data": out_df,
-                            "type": "volume" # 식별자 추가
+                            "type": "volume" # 식별자
                         })
                         st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
@@ -572,15 +566,20 @@ if run_button:
 # =====================================================================
 if st.session_state["analysis_history"]:
     st.divider()
+    
+    # 💡 [핵심 구현] 히스토리에 거래량(레짐) 분석 기록이 단 하나라도 있으면,
+    # 새창을 띄우지 않고 히스토리 영역 바로 상단에 설명자료를 직접 노출합니다.
+    if any(record.get("type") == "volume" for record in st.session_state["analysis_history"]):
+        st.markdown(VOLUME_EXPLANATION_HTML, unsafe_allow_html=True)
+        st.divider()
+        
     st.header(f"🗂️ 분석 결과 비교 히스토리 (최근 {MAX_HISTORY}건)")
     for record in st.session_state["analysis_history"]:
         with st.container():
             st.markdown(f"**{record['title']}**")
             _, btn_col1, btn_col2 = st.columns([8, 1, 1])
             with btn_col1:
-                # 레짐 분석 결과일 경우에만 설명자료 HTML 첨부 옵션 활성화
-                is_vol = record.get("type") == "volume"
-                st.markdown(generate_new_window_link(record['data'], record['title'], is_volume_analysis=is_vol), unsafe_allow_html=True)
+                st.markdown(generate_new_window_link(record['data'], record['title']), unsafe_allow_html=True)
             with btn_col2:
                 st.button("❌ 삭제", key=f"del_{record['id']}", on_click=remove_history_item, args=(record["id"],), use_container_width=True)
             st.dataframe(record["data"], use_container_width=True, hide_index=True)
