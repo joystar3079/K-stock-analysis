@@ -3,7 +3,7 @@
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
-  · [UI 개선] 지표 설명자료에 히스토리 블록과 동일한 '삭제(닫기)' 버튼 디자인 적용
+  · [오류 수정] 이모티콘 유니코드 불일치로 인한 가격 분석 엔진 미작동 버그 수정
 """
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ st.session_state.setdefault("analysis_history", [])
 st.session_state.setdefault("master_version", "")
 st.session_state.setdefault("merge_policy", "skip")
 st.session_state.setdefault("edit_links_mode", False)
-st.session_state.setdefault("show_vol_explanation", True)  # 💡 설명자료 노출 상태 변수
+st.session_state.setdefault("show_vol_explanation", True)
 
 if "quick_links" not in st.session_state:
     st.session_state["quick_links"] = load_quick_links()
@@ -108,10 +108,11 @@ def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [r for r in st.session_state["analysis_history"] if r["id"] != item_id]
 
 def hide_vol_explanation():
-    """💡 설명자료 닫기 버튼용 콜백 함수"""
     st.session_state["show_vol_explanation"] = False
 
-# 💡 [디자인 수정] 분석 결과 블록과 동일한 스타일을 적용하기 위해 제목 분리
+# =====================================================================
+# [지표 설명자료 MD]
+# =====================================================================
 VOLUME_EXPLANATION_MD = """
 #### 1. 산출 원리 (2단계 연산 구조)
 코드 내부에서는 다음 두 단계를 거쳐 **Put_Skew_Pct**를 산출합니다.
@@ -288,9 +289,15 @@ st.divider()
 # =====================================================================
 with st.sidebar:
     st.markdown("### 📌 메인 메뉴")
+    
+    # 💡 3대 핵심 메뉴 정의
+    MENU_DATA = "⛁ 데이터 관리"
+    MENU_PRICE = "🛡️ 옵션 가격(방어벽) 분석"
+    MENU_VOL = "📊 옵션 거래량(레짐) 분석"
+    
     main_menu = st.radio(
         "메뉴 선택",
-        ["⛁ 데이터 관리", "🛡️ 옵션 가격(방어벽) 분석", "📊 옵션 거래량(레짐) 분석"],
+        [MENU_DATA, MENU_PRICE, MENU_VOL],
         label_visibility="collapsed"
     )
     st.divider()
@@ -298,7 +305,7 @@ with st.sidebar:
     run_button = False
     
     # ── [메뉴 1] 데이터 관리 ──────────────────────────────────────────
-    if main_menu == "⛁ 데이터 관리":
+    if main_menu == MENU_DATA:
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
         
@@ -344,7 +351,7 @@ with st.sidebar:
         st.caption(f"data_io: {IO_VERSION}")
 
     # ── [메뉴 2] 옵션 가격(방어벽) 분석 ────────────────────────────────
-    elif main_menu == "🛡️ 옵션 가격(방어벽) 분석":
+    elif main_menu == MENU_PRICE:
         st.markdown("#### 🛡️ 가격 기반 방어벽 분석")
         engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
         st.markdown("<br>", unsafe_allow_html=True)
@@ -362,7 +369,7 @@ with st.sidebar:
         run_button = st.button("🚀 가격 방어벽 엔진 가동", type="primary", use_container_width=True)
 
     # ── [메뉴 3] 옵션 거래량(레짐) 분석 ────────────────────────────────
-    elif main_menu == "📊 옵션 거래량(레짐) 분석":
+    elif main_menu == MENU_VOL:
         st.markdown("#### 📊 거래량 기반 레짐 분석")
         mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석 (15일)", "구간 조회"), label_visibility="collapsed")
         target_date = target_start = target_end = None
@@ -377,7 +384,7 @@ with st.sidebar:
 # =====================================================================
 # [결과 화면 1] 추출 완료 + 마스터 현황 (데이터 관리 메뉴일 때만 표시)
 # =====================================================================
-if main_menu == "⛁ 데이터 관리":
+if main_menu == MENU_DATA:
     if st.session_state.get("extract_error_stats") is not None:
         with st.expander("🩺 수집 실패 진단", expanded=True):
             st.error(st.session_state.get("extract_error_msg", "수집에 실패했습니다."))
@@ -445,7 +452,8 @@ if main_menu == "⛁ 데이터 관리":
 # =====================================================================
 if run_button:
     
-    if main_menu == "🛡️️ 옵션 가격(방어벽) 분석":
+    # 💡 [버그 수정] 스트링 매칭 불일치를 방지하기 위해 정의된 상수(MENU_PRICE)로 조건문 확인
+    if main_menu == MENU_PRICE:
         with st.spinner(f"[{engine_version}] 가격 모델 연산 중..."):
             result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
         
@@ -470,8 +478,7 @@ if run_button:
             })
             st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
-    elif main_menu == "📊 옵션 거래량(레짐) 분석":
-        # 💡 거래량 분석 실행 시, 설명자료 노출 상태를 다시 True로 초기화
+    elif main_menu == MENU_VOL:
         st.session_state["show_vol_explanation"] = True
         
         with st.spinner("거래량 마이크로스트럭처 레짐 연산 중..."):
@@ -526,15 +533,11 @@ if run_button:
 if st.session_state["analysis_history"]:
     st.divider()
     
-    # 💡 [핵심 구현] 거래량(레짐) 분석 기록이 있고, 사용자가 삭제(닫기)를 누르지 않았을 때 출력
-    has_volume_history = any(record.get("type") == "volume" for record in st.session_state["analysis_history"])
-    
-    if has_volume_history and st.session_state.get("show_vol_explanation", True):
+    if any(record.get("type") == "volume" for record in st.session_state["analysis_history"]) and st.session_state.get("show_vol_explanation", True):
         with st.container():
             st.markdown("**📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)**")
             _, btn_col1, btn_col2 = st.columns([8, 1, 1])
             with btn_col2:
-                # 설명자료 닫기(삭제) 버튼
                 st.button("❌ 삭제", key="del_vol_exp", on_click=hide_vol_explanation, use_container_width=True)
             
             st.markdown(VOLUME_EXPLANATION_MD)
