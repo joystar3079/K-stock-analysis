@@ -3,7 +3,7 @@
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
-  · [오류 수정] 지표 설명자료 HTML 노출 버그 해결 -> 순수 Markdown 포맷으로 교체
+  · [오류 수정] 지표 설명자료 표(Table) 내부의 <br> 태그 렌더링 오류 수정 (순수 텍스트 포맷팅으로 교체)
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def toggle_edit():
 def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [r for r in st.session_state["analysis_history"] if r["id"] != item_id]
 
-# 💡 [버그 수정] HTML 태그 오류를 방지하는 순수 마크다운(Markdown) 기반 지표 설명자료
+# 💡 [버그 수정] 표 내부의 <br> 태그를 제거하고 순수 마크다운 텍스트 디자인으로 교체
 VOLUME_EXPLANATION_MD = """
 ### 📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)
 
@@ -132,10 +132,10 @@ VOLUME_EXPLANATION_MD = """
 
 | Put_Skew_Pct 구간 | 시장 미시구조 상태 | 주가 위치별 실전 해석 및 전략 |
 | :--- | :--- | :--- |
-| **90% ~ 100%**<br>*(극단적 왜곡/패닉)* | 딜러들의 숏 베가(Short Vega) 한계 도달.<br>대중과 기관이 OTM 풋옵션을 시장가로 쓸어 담는 상태 | **• 급락장 바닥권 (Regime 1):** 대중의 투매가 끝자락에 도달한 역발상 매수 타점<br>**• 상승장 고점권:** 스마트 머니가 폭락 직전 풋옵션을 선취매하는 발작 경보 |
-| **75% ~ 89%**<br>*(하방 경계심 고조)* | OTM 풋옵션 수요가 뚜렷하게 증가하며 스큐가 가팔라지는 구간 | **• 조정 구간 (DD_10 ≤ -6%):** 기간구조 역전(Backwardation)과 결합 시 Regime 1 진입 조건 충족 |
-| **25% ~ 74%**<br>*(중립 / 평상시)* | 콜/풋옵션의 수급 균형이 유지되는 일반적인 시장 상태 | **• 중립 구간:** 스큐 단독으로는 특이 시그널 없음 (거래량 및 미결제약정 증감으로 방향성 판별) |
-| **0% ~ 24%**<br>*(극단적 안도/과열)* | 하방 보험 수요가 완전히 소멸하거나, 상방 콜옵션 수요가 몰린 상태 | **• 고점 부근:** 하락 공포를 잊은 FOMO 구간. 기관의 OI 청산 동반 시 Regime 2(고점 엑시트) 위험 급증 |
+| **90% ~ 100%** *(극단적 왜곡/패닉)* | 딜러들의 숏 베가(Short Vega) 한계 도달. 대중과 기관이 OTM 풋옵션을 시장가로 쓸어 담는 상태 | **• 급락장 바닥권 (Regime 1):** 대중의 투매가 끝자락에 도달한 역발상 매수 타점 ➔ **• 상승장 고점권:** 스마트 머니가 폭락 직전 풋옵션을 선취매하는 발작 경보 |
+| **75% ~ 89%** *(하방 경계심 고조)* | OTM 풋옵션 수요가 뚜렷하게 증가하며 스큐가 가팔라지는 구간 | **• 조정 구간 (DD_10 ≤ -6%):** 기간구조 역전(Backwardation)과 결합 시 Regime 1 진입 조건 충족 |
+| **25% ~ 74%** *(중립 / 평상시)* | 콜/풋옵션의 수급 균형이 유지되는 일반적인 시장 상태 | **• 중립 구간:** 스큐 단독으로는 특이 시그널 없음 (거래량 및 미결제약정 증감으로 방향성 판별) |
+| **0% ~ 24%** *(극단적 안도/과열)* | 하방 보험 수요가 완전히 소멸하거나, 상방 콜옵션 수요가 몰린 상태 | **• 고점 부근:** 하락 공포를 잊은 FOMO 구간. 기관의 OI 청산 동반 시 Regime 2(고점 엑시트) 위험 급증 |
 """
 
 def generate_new_window_link(df, title):
@@ -294,6 +294,7 @@ with st.sidebar:
 
     run_button = False
     
+    # ── [메뉴 1] 데이터 관리 ──────────────────────────────────────────
     if main_menu == "⛁ 데이터 관리":
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
@@ -339,6 +340,7 @@ with st.sidebar:
                 
         st.caption(f"data_io: {IO_VERSION}")
 
+    # ── [메뉴 2] 옵션 가격(방어벽) 분석 ────────────────────────────────
     elif main_menu == "🛡️ 옵션 가격(방어벽) 분석":
         st.markdown("#### 🛡️ 가격 기반 방어벽 분석")
         engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
@@ -356,6 +358,7 @@ with st.sidebar:
             
         run_button = st.button("🚀 가격 방어벽 엔진 가동", type="primary", use_container_width=True)
 
+    # ── [메뉴 3] 옵션 거래량(레짐) 분석 ────────────────────────────────
     elif main_menu == "📊 옵션 거래량(레짐) 분석":
         st.markdown("#### 📊 거래량 기반 레짐 분석")
         mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석 (15일)", "구간 조회"), label_visibility="collapsed")
@@ -516,7 +519,8 @@ if run_button:
 if st.session_state["analysis_history"]:
     st.divider()
     
-    # 💡 [핵심 구현] 히스토리에 거래량 분석(volume) 결과가 하나라도 있으면 순수 마크다운 설명자료 출력
+    # 💡 히스토리에 거래량(레짐) 분석 기록이 단 하나라도 있으면,
+    # 새창을 띄우지 않고 히스토리 영역 바로 상단에 마크다운 설명자료를 직접 노출합니다.
     if any(record.get("type") == "volume" for record in st.session_state["analysis_history"]):
         st.markdown(VOLUME_EXPLANATION_MD)
         st.divider()
