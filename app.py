@@ -3,7 +3,7 @@
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
-  · [UI 개편] 거래량 레짐 분석 시 히스토리 상단에 지표 설명자료(HTML) 직접 노출
+  · [오류 수정] 지표 설명자료 HTML 노출 버그 해결 -> 순수 Markdown 포맷으로 교체
 """
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ from features import aggregate_oi_features, attach_price
 from phases import assign_phases
 from presenters import add_display_columns
 
-# 신규 퀀트 모델 모듈 임포트
 from volume_analysis import run_volume_analysis
 
 warnings.filterwarnings("ignore")
@@ -107,79 +106,36 @@ def toggle_edit():
 def remove_history_item(item_id: str) -> None:
     st.session_state["analysis_history"] = [r for r in st.session_state["analysis_history"] if r["id"] != item_id]
 
+# 💡 [버그 수정] HTML 태그 오류를 방지하는 순수 마크다운(Markdown) 기반 지표 설명자료
+VOLUME_EXPLANATION_MD = """
+### 📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)
 
-# 💡 거래량 레짐 분석 결과 상단에 띄울 지표 설명자료 HTML 정의
-VOLUME_EXPLANATION_HTML = """
-<div style="margin-bottom: 30px; padding: 25px; border: 1px solid #dcdde1; border-radius: 10px; background-color: #f5f6fa; text-align: left; line-height: 1.6;">
-    <h2 style="color: #2f3640; border-bottom: 2px solid #7f8fa6; padding-bottom: 10px; margin-top: 0;">📊 지표 설명자료 (V28.4 마이크로스트럭처 엔진)</h2>
-    
-    <h3 style="color: #273c75; margin-top: 25px;">1. 산출 원리 (2단계 연산 구조)</h3>
-    <p>코드 내부에서는 다음 두 단계를 거쳐 <strong>Put_Skew_Pct</strong>를 산출합니다.</p>
-    
-    <h4 style="color: #40739e;">① 원천 하방 스큐 (Put_Skew) 계산:</h4>
-    <div style="background-color: #dcdde1; padding: 15px; border-radius: 6px; font-family: 'Courier New', Courier, monospace; font-size: 15px; font-weight: bold; text-align: center; margin: 15px 0;">
-        Put_Skew_t = IV_{OTM Put, t} - IV_{ATM, t}
-    </div>
-    <ul style="color: #2f3640;">
-        <li style="margin-bottom: 8px;"><strong>IV_{OTM Put} (외가격 풋옵션 IV):</strong> 현재 주가보다 5% 이상 낮은 행사가(Strike &le; Spot &times; 0.95)에 위치한 풋옵션들의 거래량 가중평균 내재변동성입니다. (급락에 베팅하거나 방어하려는 <i>'폭락 보험료'</i>)</li>
-        <li><strong>IV_{ATM} (등가격 옵션 IV):</strong> 현재 주가 &plusmn; 5% 이내(0.95 &le; Strike/Spot &le; 1.05) 옵션들의 가중평균 내재변동성입니다. (시장의 <i>기본 변동성</i>)</li>
-    </ul>
-    <p style="background-color: #e84118; color: white; padding: 10px; border-radius: 4px; font-weight: bold; margin-bottom: 0;">
-        💡 즉, Put_Skew가 클수록 시장 참여자들이 평상시 변동성 대비 하방 폭락 가능성에 훨씬 비싼 프리미엄(웃돈)을 지불하며 풋옵션을 사들이고 있음을 의미합니다.
-    </p>
-    
-    <h4 style="color: #40739e; margin-top:30px;">② 60영업일 롤링 백분위 (Put_Skew_Pct) 변환:</h4>
-    <p>시장의 기본 변동성 레벨은 시기마다 달라지므로 절대값만으로는 과열 여부를 판단하기 어렵습니다. 따라서 직전 <strong>60영업일(약 3개월)</strong> 동안의 Put_Skew 값들을 줄 세운 뒤, 오늘의 수치가 차지하는 순위를 백분율(0% ~ 100%)로 환산합니다.</p>
-    <p style="background-color: #44bd32; color: white; padding: 10px; border-radius: 4px; margin-bottom: 0;">
-        📌 <strong>예시:</strong> Put_Skew_Pct = 95.0%라면, 최근 60영업일 중 오늘보다 풋옵션 웃돈이 더 비쌌던 날이 단 3일(상위 5%)뿐일 정도로 <strong>하방 헤지 수요가 극에 달했다는 뜻</strong>입니다.
-    </p>
+#### 1. 산출 원리 (2단계 연산 구조)
+코드 내부에서는 다음 두 단계를 거쳐 **Put_Skew_Pct**를 산출합니다.
 
-    <h3 style="color: #273c75; margin-top: 40px;">2. 구간별 수치 해석 및 실전 매매 활용법</h3>
-    <table style="width: 100%; border-collapse: collapse; margin-top: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <tr style="background-color: #353b48; color: white;">
-            <th style="border: 1px solid #7f8fa6; padding: 12px; width: 18%;">Put_Skew_Pct 구간</th>
-            <th style="border: 1px solid #7f8fa6; padding: 12px; width: 35%;">시장 미시구조 상태</th>
-            <th style="border: 1px solid #7f8fa6; padding: 12px; width: 47%;">주가 위치별 실전 해석 및 전략</th>
-        </tr>
-        <tr style="background-color: white;">
-            <td style="border: 1px solid #dcdde1; padding: 12px; text-align: center;"><strong>90% ~ 100%</strong><br><span style="font-size: 0.85em; color: #c0392b; font-weight: bold;">(극단적 왜곡 / 패닉)</span></td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">딜러들의 숏 베가(Short Vega) 한계 도달.<br>대중과 기관이 가격 불문하고 OTM 풋옵션을 시장가로 쓸어 담는 보험료 폭등 상태</td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">
-                <ul style="margin: 0; padding-left: 20px;">
-                    <li style="margin-bottom: 6px;"><strong>급락장 바닥권 (Regime 1):</strong> 대중의 투매가 끝자락에 도달한 '진성 반등 저점' 시그널 (역발상 매수 타점)</li>
-                    <li><strong>상승장 고점권:</strong> 스마트 머니가 폭락 직전 풋옵션을 선취매(Tail-risk Hedging)하는 '고점 발작 경보'</li>
-                </ul>
-            </td>
-        </tr>
-        <tr style="background-color: #f5f6fa;">
-            <td style="border: 1px solid #dcdde1; padding: 12px; text-align: center;"><strong>75% ~ 89%</strong><br><span style="font-size: 0.85em; color: #e1b12c; font-weight: bold;">(하방 경계심 고조)</span></td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">OTM 풋옵션 수요가 뚜렷하게 증가하며 스큐가 가팔라지는 구간</td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">
-                <ul style="margin: 0; padding-left: 20px;">
-                    <li><strong>조정 구간 (DD_10 &le; -6%):</strong> 기간구조 역전(Backwardation)과 결합될 경우 Regime 1(투매 클라이막스) 진입 조건 충족</li>
-                </ul>
-            </td>
-        </tr>
-        <tr style="background-color: white;">
-            <td style="border: 1px solid #dcdde1; padding: 12px; text-align: center;"><strong>25% ~ 74%</strong><br><span style="font-size: 0.85em; color: #718093; font-weight: bold;">(중립 / 평상시)</span></td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">콜옵션과 풋옵션의 수급 균형이 유지되는 일반적인 시장 상태</td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">
-                <ul style="margin: 0; padding-left: 20px;">
-                    <li>스큐 단독으로는 특이 시그널 없음 (거래량 및 미결제약정 증감으로 방향성 판별)</li>
-                </ul>
-            </td>
-        </tr>
-        <tr style="background-color: #f5f6fa;">
-            <td style="border: 1px solid #dcdde1; padding: 12px; text-align: center;"><strong>0% ~ 24%</strong><br><span style="font-size: 0.85em; color: #4cd137; font-weight: bold;">(극단적 안도 / 과열)</span></td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">하방 보험 수요가 완전히 소멸하거나, 반대로 상방 콜옵션 수요가 몰려 분모(IV_ATM)가 커진 상태</td>
-            <td style="border: 1px solid #dcdde1; padding: 12px;">
-                <ul style="margin: 0; padding-left: 20px;">
-                    <li><strong>고점 부근:</strong> 시장 참여자들이 하락 공포를 완전히 잊은 FOMO(상승 취함) 구간으로, 이때 기관의 OI 청산이 동반되면 Regime 2(고점 엑시트) 위험 급증</li>
-                </ul>
-            </td>
-        </tr>
-    </table>
-</div>
+**① 원천 하방 스큐 (Put_Skew) 계산:**
+> **Put_Skew_t = IV_{OTM Put, t} - IV_{ATM, t}**
+
+* **IV_{OTM Put} (외가격 풋옵션 IV):** 현재 주가보다 5% 이상 낮은 행사가에 위치한 풋옵션들의 거래량 가중평균 내재변동성입니다. (급락에 베팅하거나 방어하려는 *'폭락 보험료'*)
+* **IV_{ATM} (등가격 옵션 IV):** 현재 주가 ±5% 이내 옵션들의 가중평균 내재변동성입니다. (시장의 *기본 변동성*)
+
+💡 **즉, Put_Skew가 클수록 시장 참여자들이 평상시 변동성 대비 하방 폭락 가능성에 훨씬 비싼 프리미엄(웃돈)을 지불하며 풋옵션을 사들이고 있음을 의미합니다.**
+
+**② 60영업일 롤링 백분위 (Put_Skew_Pct) 변환:**
+시장의 기본 변동성 레벨은 시기마다 달라지므로 절대값만으로는 과열 여부를 판단하기 어렵습니다. 따라서 직전 **60영업일(약 3개월)** 동안의 Put_Skew 값들을 줄 세운 뒤, 오늘의 수치가 차지하는 순위를 백분율(0% ~ 100%)로 환산합니다.
+
+📌 **예시:** Put_Skew_Pct = 95.0%라면, 최근 60영업일 중 오늘보다 풋옵션 웃돈이 더 비쌌던 날이 단 3일(상위 5%)뿐일 정도로 **하방 헤지 수요가 극에 달했다는 뜻**입니다.
+
+---
+
+#### 2. 구간별 수치 해석 및 실전 매매 활용법
+
+| Put_Skew_Pct 구간 | 시장 미시구조 상태 | 주가 위치별 실전 해석 및 전략 |
+| :--- | :--- | :--- |
+| **90% ~ 100%**<br>*(극단적 왜곡/패닉)* | 딜러들의 숏 베가(Short Vega) 한계 도달.<br>대중과 기관이 OTM 풋옵션을 시장가로 쓸어 담는 상태 | **• 급락장 바닥권 (Regime 1):** 대중의 투매가 끝자락에 도달한 역발상 매수 타점<br>**• 상승장 고점권:** 스마트 머니가 폭락 직전 풋옵션을 선취매하는 발작 경보 |
+| **75% ~ 89%**<br>*(하방 경계심 고조)* | OTM 풋옵션 수요가 뚜렷하게 증가하며 스큐가 가팔라지는 구간 | **• 조정 구간 (DD_10 ≤ -6%):** 기간구조 역전(Backwardation)과 결합 시 Regime 1 진입 조건 충족 |
+| **25% ~ 74%**<br>*(중립 / 평상시)* | 콜/풋옵션의 수급 균형이 유지되는 일반적인 시장 상태 | **• 중립 구간:** 스큐 단독으로는 특이 시그널 없음 (거래량 및 미결제약정 증감으로 방향성 판별) |
+| **0% ~ 24%**<br>*(극단적 안도/과열)* | 하방 보험 수요가 완전히 소멸하거나, 상방 콜옵션 수요가 몰린 상태 | **• 고점 부근:** 하락 공포를 잊은 FOMO 구간. 기관의 OI 청산 동반 시 Regime 2(고점 엑시트) 위험 급증 |
 """
 
 def generate_new_window_link(df, title):
@@ -227,7 +183,6 @@ def build_full_frame(version: str) -> tuple[pd.DataFrame, dict]:
 
     cfg = ENGINES[version]
 
-    # 마스터 파일 내장 주가 자체 추출 (외부 API 독립)
     if "EWY Price" in master_df.columns:
         px = master_df[["Quote Date", "EWY Price"]].drop_duplicates(subset=["Quote Date"]).copy()
         px.rename(columns={"Quote Date": "Date", "EWY Price": "Close Price"}, inplace=True)
@@ -339,7 +294,6 @@ with st.sidebar:
 
     run_button = False
     
-    # ── [메뉴 1] 데이터 관리 ──────────────────────────────────────────
     if main_menu == "⛁ 데이터 관리":
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
@@ -385,7 +339,6 @@ with st.sidebar:
                 
         st.caption(f"data_io: {IO_VERSION}")
 
-    # ── [메뉴 2] 옵션 가격(방어벽) 분석 ────────────────────────────────
     elif main_menu == "🛡️ 옵션 가격(방어벽) 분석":
         st.markdown("#### 🛡️ 가격 기반 방어벽 분석")
         engine_version = st.radio("버전", list(ENGINES.keys()), label_visibility="collapsed")
@@ -403,7 +356,6 @@ with st.sidebar:
             
         run_button = st.button("🚀 가격 방어벽 엔진 가동", type="primary", use_container_width=True)
 
-    # ── [메뉴 3] 옵션 거래량(레짐) 분석 ────────────────────────────────
     elif main_menu == "📊 옵션 거래량(레짐) 분석":
         st.markdown("#### 📊 거래량 기반 레짐 분석")
         mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석 (15일)", "구간 조회"), label_visibility="collapsed")
@@ -414,7 +366,6 @@ with st.sidebar:
             with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
             
         run_button = st.button("🚀 거래량 레짐 엔진 가동", type="primary", use_container_width=True)
-
 
 # =====================================================================
 # [결과 화면 1] 추출 완료 + 마스터 현황 (데이터 관리 메뉴일 때만 표시)
@@ -482,7 +433,6 @@ if main_menu == "⛁ 데이터 관리":
                     st.session_state["push_error"] = str(e)
                     st.rerun()
 
-
 # =====================================================================
 # [결과 화면 2] 분석 모듈별 실행 로직
 # =====================================================================
@@ -509,7 +459,7 @@ if run_button:
                 "id": uuid.uuid4().hex[:8],
                 "title": f"📌 [{stamp}] 가격(방어벽) 엔진 - {engine_version} | {detail}",
                 "data": result_df,
-                "type": "price" # 식별자
+                "type": "price" 
             })
             st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
@@ -556,10 +506,9 @@ if run_button:
                             "id": uuid.uuid4().hex[:8],
                             "title": f"📊 [{stamp}] 거래량(레짐) 엔진 - V28.4 | {detail}",
                             "data": out_df,
-                            "type": "volume" # 식별자
+                            "type": "volume" 
                         })
                         st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
-
 
 # =====================================================================
 # [결과 화면 3] 히스토리 (메뉴 상관없이 항상 하단에 노출)
@@ -567,10 +516,9 @@ if run_button:
 if st.session_state["analysis_history"]:
     st.divider()
     
-    # 💡 [핵심 구현] 히스토리에 거래량(레짐) 분석 기록이 단 하나라도 있으면,
-    # 새창을 띄우지 않고 히스토리 영역 바로 상단에 설명자료를 직접 노출합니다.
+    # 💡 [핵심 구현] 히스토리에 거래량 분석(volume) 결과가 하나라도 있으면 순수 마크다운 설명자료 출력
     if any(record.get("type") == "volume" for record in st.session_state["analysis_history"]):
-        st.markdown(VOLUME_EXPLANATION_HTML, unsafe_allow_html=True)
+        st.markdown(VOLUME_EXPLANATION_MD)
         st.divider()
         
     st.header(f"🗂️ 분석 결과 비교 히스토리 (최근 {MAX_HISTORY}건)")
