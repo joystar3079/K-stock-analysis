@@ -3,7 +3,7 @@
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
-  · [오류 수정] 이모티콘 유니코드 불일치로 인한 가격 분석 엔진 미작동 버그 수정
+  · [오류 수정] 최신 안드로이드 스마트폰(갤럭시)에서 파일 업로드 시 카메라/갤러리만 뜨는 문제 해결 (MIME 및 확장자 필터 제거 후 서버단 검증으로 우회)
 """
 from __future__ import annotations
 
@@ -309,17 +309,35 @@ with st.sidebar:
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
         
-        # 모바일(안드로이드/iOS) 브라우저에서 '내 파일' 탐색기가 정상적으로 열리도록 MIME Type 명시적 추가
-        up_files = st.file_uploader(
+        # [모바일 안드로이드/갤럭시 브라우저 버그 완벽 우회]
+        # 안드로이드 최신 버전(특히 삼성 인터넷/모바일 크롬)에서 type 파라미터가 있으면 MIME 정책 충돌로
+        # 파일 탐색기 대신 '카메라/갤러리'만 띄우는 심각한 버그가 존재합니다.
+        # 이를 해결하기 위해 type 제한을 아예 풀어서 시스템의 '내 파일(기기 폴더)'이 무조건 열리게 강제하고,
+        # 사용자가 올린 파일이 엑셀/CSV가 맞는지는 파이썬 백엔드(업로드 후 처리)에서 걸러내도록 설계했습니다.
+        raw_files = st.file_uploader(
             "📁 옵션 분석데이터 (CSV/Excel) 업로드", 
-            type=["csv", "xlsx", "xls", "text/csv", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"], 
             accept_multiple_files=True, 
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="안드로이드 '내 파일' 강제 호출을 위해 모든 파일이 선택 가능하게 열려있습니다. CSV나 Excel 파일만 선택해주세요."
         )
-        st.caption("로컬/코랩 환경에서 생성한 완성형 CSV 파일을 드래그 앤 드롭 하세요.")
+        st.caption("로컬/모바일 기기에 저장된 CSV 또는 Excel 파일을 선택하세요.")
         
+        # 파이썬 서버단에서 올바른 확장자인지 검증 (필터링)
+        up_files = []
+        if raw_files:
+            valid_exts = ['.csv', '.xls', '.xlsx']
+            invalid_files = []
+            for f in raw_files:
+                if any(f.name.lower().endswith(ext) for ext in valid_exts):
+                    up_files.append(f)
+                else:
+                    invalid_files.append(f.name)
+            
+            if invalid_files:
+                st.error(f"❌ 지원되지 않는 파일 포맷이 제외되었습니다: {', '.join(invalid_files)}")
+
         if up_files:
-            st.caption(f"선택된 파일 {len(up_files)}개 — 마스터에 누적 병합됩니다.")
+            st.caption(f"유효한 파일 {len(up_files)}개 — 마스터에 누적 병합됩니다.")
 
         if st.button("📄 업로드 파일 변환", type="primary", use_container_width=True, disabled=not up_files):
             with st.spinner(f"{len(up_files)}개 파일 파싱 및 병합 중..."):
@@ -458,7 +476,6 @@ if main_menu == MENU_DATA:
 # =====================================================================
 if run_button:
     
-    # 💡 [버그 수정] 스트링 매칭 불일치를 방지하기 위해 정의된 상수(MENU_PRICE)로 조건문 확인
     if main_menu == MENU_PRICE:
         with st.spinner(f"[{engine_version}] 가격 모델 연산 중..."):
             result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
