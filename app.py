@@ -5,6 +5,7 @@
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
   · [오류 수정] 삼성 갤럭시 One UI 최신버전 '내 파일' 강제 호출 패치 완료
   · [기능 추가] 다차원 유사도 패턴 분석 (옵션 가격, 옵션 거래량 모두 Top3 추출 지원)
+  · [오류 수정] Streamlit Cloud 배포 시 발생하는 sklearn, scipy ModuleNotFoundError 완벽 해결 (Numpy 순수 구현으로 대체 및 import문 완전 제거)
 """
 from __future__ import annotations
 
@@ -31,8 +32,11 @@ from presenters import add_display_columns
 
 from volume_analysis import run_volume_analysis
 
-from sklearn.preprocessing import MinMaxScaler
-from scipy.spatial.distance import euclidean
+# [핵심 수정] 
+# 기존에 있던 아래 두 줄의 import 문을 완전히 삭제했습니다.
+# from sklearn.preprocessing import MinMaxScaler
+# from scipy.spatial.distance import euclidean
+# (내부 로직은 이미 순수 Numpy로 구현되어 있으므로 더 이상 이 라이브러리들이 필요하지 않습니다.)
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V34", page_icon="📈", layout="wide")
@@ -168,6 +172,7 @@ def generate_new_window_link(df, title):
 # (옵션 가격 분석 및 거래량 분석 공통 지원)
 # =====================================================================
 def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
+    # 마스터 데이터를 일자별 다차원 특징(거래량, 내재변동성, 미결제약정, 기초자산가격 등)으로 집계
     if "Quote Date" not in master_df.columns:
         return pd.DataFrame()
         
@@ -197,6 +202,7 @@ def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start_date, target_end_date) -> pd.DataFrame:
+    # 기초자산 가격, 거래량, IV, OI의 4차원 스케일링을 통해 과거(2024년~) 유사 패턴 Top 3 추출
     daily_df = get_daily_master_summary(master_df)
     if daily_df.empty: return pd.DataFrame()
     
@@ -214,20 +220,33 @@ def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start
     if len(history_df) < window_size:
         return pd.DataFrame()
         
-    scaler = MinMaxScaler()
     features = ['Close_Price', 'Total_Vol', 'Avg_IV', 'Total_OI']
     
-    target_scaled = scaler.fit_transform(target_data[features])
-    history_scaled = scaler.transform(history_df[features])
+    # sklearn.preprocessing.MinMaxScaler를 Numpy 순수 구현으로 완전 대체
+    t_vals = target_data[features].values
+    h_vals = history_df[features].values
+    
+    t_min = t_vals.min(axis=0)
+    t_max = t_vals.max(axis=0)
+    t_range = t_max - t_min
+    t_range[t_range == 0] = 1e-9  # 0으로 나누기 방지
+    
+    target_scaled = (t_vals - t_min) / t_range
+    history_scaled = (h_vals - t_min) / t_range
 
     distances = []
     for i in range(len(history_scaled) - window_size + 1):
         window_data = history_scaled[i : i + window_size]
-        dist = np.sum([euclidean(target_scaled[:, j], window_data[:, j]) for j in range(len(features))])
+        
+        # scipy.spatial.distance.euclidean을 Numpy 순수 구현으로 완전 대체
+        dist = 0.0
+        for j in range(len(features)):
+            dist += np.sqrt(np.sum((target_scaled[:, j] - window_data[:, j]) ** 2))
         
         start_date = history_df.iloc[i]['Date']
         end_date = history_df.iloc[i + window_size - 1]['Date']
         
+        # 미래 T+5 수익률 계산
         if (i + window_size - 1 + 5) < len(history_df):
             t5_price = history_df.iloc[i + window_size - 1 + 5]['Close_Price']
             curr_price = history_df.iloc[i + window_size - 1]['Close_Price']
@@ -517,7 +536,11 @@ if main_menu == MENU_DATA:
         st.success(f"✅ 업로드 완료 — 전체 {stats.get('total_rows', len(df_ext)):,}행 적용 완료")
 
         if stats.get("failed_files"):
-            warning_msg = "변환 실패 파일:\n\n" + "\n\n".join(f"· {x}" for x in stats["failed_files"])
+            warning_msg = "변환 실패 파일:
+
+" + "
+
+".join(f"· {x}" for x in stats["failed_files"])
             st.warning(warning_msg)
 
         master_info = load_master_data(st.session_state["master_version"])
