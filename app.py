@@ -4,8 +4,6 @@
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
   · [오류 수정] 삼성 갤럭시 One UI 최신버전 '내 파일' 강제 호출 패치 완료
-  · [기능 추가] 다차원 유사도 패턴 분석 (옵션 가격, 옵션 거래량 모두 Top3 추출 지원)
-  · [오류 수정] Streamlit Cloud 배포 시 발생하는 sklearn, scipy ModuleNotFoundError 완벽 해결 (Numpy 순수 구현으로 대체 및 import문 완전 제거)
 """
 from __future__ import annotations
 
@@ -31,12 +29,6 @@ from phases import assign_phases
 from presenters import add_display_columns
 
 from volume_analysis import run_volume_analysis
-
-# [핵심 수정] 
-# 기존에 있던 아래 두 줄의 import 문을 완전히 삭제했습니다.
-# from sklearn.preprocessing import MinMaxScaler
-# from scipy.spatial.distance import euclidean
-# (내부 로직은 이미 순수 Numpy로 구현되어 있으므로 더 이상 이 라이브러리들이 필요하지 않습니다.)
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V34", page_icon="📈", layout="wide")
@@ -136,6 +128,8 @@ VOLUME_EXPLANATION_MD = """
 **② 60영업일 롤링 백분위 (Put_Skew_Pct) 변환:**
 시장의 기본 변동성 레벨은 시기마다 달라지므로 절대값만으로는 과열 여부를 판단하기 어렵습니다. 따라서 직전 **60영업일(약 3개월)** 동안의 Put_Skew 값들을 줄 세운 뒤, 오늘의 수치가 차지하는 순위를 백분율(0% ~ 100%)로 환산합니다.
 
+📌 **예시:** Put_Skew_Pct = 95.0%라면, 최근 60영업일 중 오늘보다 풋옵션 웃돈이 더 비쌌던 날이 단 3일(상위 5%)뿐일 정도로 **하방 헤지 수요가 극에 달했다는 뜻**입니다.
+
 ---
 
 #### 2. 구간별 수치 해석 및 실전 매매 활용법
@@ -166,118 +160,6 @@ def generate_new_window_link(df, title):
     b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8').replace('\n', '')
     btn_html = f"""<a href="javascript:void(0);" onclick="var w=window.open(); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">↗️ 새창 열기</a>"""
     return btn_html
-
-# =====================================================================
-# [다차원 유사도 패턴 분석 코어] 
-# (옵션 가격 분석 및 거래량 분석 공통 지원)
-# =====================================================================
-def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
-    # 마스터 데이터를 일자별 다차원 특징(거래량, 내재변동성, 미결제약정, 기초자산가격 등)으로 집계
-    if "Quote Date" not in master_df.columns:
-        return pd.DataFrame()
-        
-    df_clean = master_df.copy()
-    for col in ['Volume', 'Open Interest', 'Implied Volatility', 'EWY Price', 'Strike']:
-        if col in df_clean.columns:
-            df_clean[col] = pd.to_numeric(df_clean[col].astype(str).str.replace(',', '').str.replace('%', ''), errors='coerce').fillna(0)
-    
-    df_clean['Quote Date'] = pd.to_datetime(df_clean['Quote Date']).dt.tz_localize(None).dt.normalize()
-    
-    daily = df_clean.groupby('Quote Date').agg({
-        'Volume': 'sum',
-        'Open Interest': 'sum',
-        'Implied Volatility': lambda x: x[x > 0].mean() if len(x[x > 0]) > 0 else 0,
-        'EWY Price': 'last'
-    }).reset_index()
-    
-    daily.rename(columns={
-        'Quote Date': 'Date',
-        'Volume': 'Total_Vol',
-        'Open Interest': 'Total_OI',
-        'Implied Volatility': 'Avg_IV',
-        'EWY Price': 'Close_Price'
-    }, inplace=True)
-    
-    daily = daily.sort_values('Date').dropna().reset_index(drop=True)
-    return daily
-
-def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start_date, target_end_date) -> pd.DataFrame:
-    # 기초자산 가격, 거래량, IV, OI의 4차원 스케일링을 통해 과거(2024년~) 유사 패턴 Top 3 추출
-    daily_df = get_daily_master_summary(master_df)
-    if daily_df.empty: return pd.DataFrame()
-    
-    t_start = pd.to_datetime(target_start_date)
-    t_end = pd.to_datetime(target_end_date)
-    
-    target_data = daily_df[(daily_df['Date'] >= t_start) & (daily_df['Date'] <= t_end)].copy()
-    window_size = len(target_data)
-    
-    if window_size < 3:
-        return pd.DataFrame() 
-        
-    history_df = daily_df[(daily_df['Date'] >= '2024-01-01') & (daily_df['Date'] < target_data['Date'].min())].reset_index(drop=True)
-    
-    if len(history_df) < window_size:
-        return pd.DataFrame()
-        
-    features = ['Close_Price', 'Total_Vol', 'Avg_IV', 'Total_OI']
-    
-    # sklearn.preprocessing.MinMaxScaler를 Numpy 순수 구현으로 완전 대체
-    t_vals = target_data[features].values
-    h_vals = history_df[features].values
-    
-    t_min = t_vals.min(axis=0)
-    t_max = t_vals.max(axis=0)
-    t_range = t_max - t_min
-    t_range[t_range == 0] = 1e-9  # 0으로 나누기 방지
-    
-    target_scaled = (t_vals - t_min) / t_range
-    history_scaled = (h_vals - t_min) / t_range
-
-    distances = []
-    for i in range(len(history_scaled) - window_size + 1):
-        window_data = history_scaled[i : i + window_size]
-        
-        # scipy.spatial.distance.euclidean을 Numpy 순수 구현으로 완전 대체
-        dist = 0.0
-        for j in range(len(features)):
-            dist += np.sqrt(np.sum((target_scaled[:, j] - window_data[:, j]) ** 2))
-        
-        start_date = history_df.iloc[i]['Date']
-        end_date = history_df.iloc[i + window_size - 1]['Date']
-        
-        # 미래 T+5 수익률 계산
-        if (i + window_size - 1 + 5) < len(history_df):
-            t5_price = history_df.iloc[i + window_size - 1 + 5]['Close_Price']
-            curr_price = history_df.iloc[i + window_size - 1]['Close_Price']
-            t5_ret = (t5_price / curr_price - 1) * 100
-        else:
-            t5_ret = np.nan
-            
-        distances.append((dist, start_date, end_date, t5_ret))
-
-    distances.sort(key=lambda x: x[0])
-    
-    top_matches = []
-    for dist, s_date, e_date, t5_ret in distances:
-        overlap = False
-        for _, ex_s, ex_e, _ in top_matches:
-            if (s_date <= ex_e) and (e_date >= ex_s):
-                overlap = True
-                break
-        if not overlap:
-            top_matches.append((dist, s_date, e_date, t5_ret))
-        if len(top_matches) == 3:
-            break
-
-    res_df = pd.DataFrame(top_matches, columns=['거리(유사도)', '시작일', '종료일', '구간 직후 T+5 수익률'])
-    res_df['시작일'] = res_df['시작일'].dt.strftime('%Y-%m-%d')
-    res_df['종료일'] = res_df['종료일'].dt.strftime('%Y-%m-%d')
-    res_df['거리(유사도)'] = res_df['거리(유사도)'].round(3)
-    res_df['구간 직후 T+5 수익률'] = res_df['구간 직후 T+5 수익률'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
-    res_df.index = [f"유사도 {i+1}위" for i in range(len(res_df))]
-    return res_df
-
 
 # =====================================================================
 # [엔진 실행 코어]
@@ -345,25 +227,21 @@ def store_extraction(df_ext, stats, file_results=None) -> None:
     except Exception as e:
         st.session_state["push_error"] = str(e)
 
-def run_quant_engine(version: str, mode: str, target_date=None, target_start=None, target_end=None) -> tuple[pd.DataFrame, dict, str, str]:
+def run_quant_engine(version: str, mode: str, target_date=None, target_start=None, target_end=None) -> tuple[pd.DataFrame, dict]:
     df, meta = build_full_frame(version)
-    if df.empty: return pd.DataFrame(), meta, None, None
+    if df.empty: return pd.DataFrame(), meta
     if mode == "구간 조회" and target_start and target_end:
         sel = df[(df["Date"] >= pd.to_datetime(target_start)) & (df["Date"] <= pd.to_datetime(target_end))].copy()
     elif mode == "타임머신 (특정일)" and target_date:
         sel = df[df["Date"] <= pd.to_datetime(target_date)].tail(10).copy()
     else:
         sel = df.tail(10).copy()
-    if sel.empty: return pd.DataFrame(), meta, None, None
-    
-    t_start = sel["Date"].min()
-    t_end = sel["Date"].max()
-    meta["anchor_date"] = t_end
-    
+    if sel.empty: return pd.DataFrame(), meta
+    meta["anchor_date"] = sel["Date"].max()
     sel = sel[DISPLAY_COLS].copy()
     sel["Date"] = sel["Date"].dt.strftime("%m/%d")
     sel["Close Price"] = sel["Close Price"].round(2)
-    return sel.rename(columns={"Close Price": f"{SYMBOL}($)", "Phase": "현재 시장 국면 진단"}), meta, t_start, t_end
+    return sel.rename(columns={"Close Price": f"{SYMBOL}($)", "Phase": "현재 시장 국면 진단"}), meta
 
 # =====================================================================
 # [상단 UI]
@@ -412,6 +290,7 @@ st.divider()
 with st.sidebar:
     st.markdown("### 📌 메인 메뉴")
     
+    # 💡 3대 핵심 메뉴 정의
     MENU_DATA = "⛁ 데이터 관리"
     MENU_PRICE = "🛡️ 옵션 가격(방어벽) 분석"
     MENU_VOL = "📊 옵션 거래량(레짐) 분석"
@@ -430,6 +309,10 @@ with st.sidebar:
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
         
+        # [모바일 안드로이드/One UI 8.0 브라우저 버그 완벽 우회 핵심 패치]
+        # type=["csv", "xlsx"]처럼 좁게 지정하면 폰에서 '내 파일'을 띄우지 않고 미디어 갤러리만 띄웁니다.
+        # 이를 해결하기 위해 카메라/갤러리 앱이 절대 지원할 수 없는 범용 문서 포맷(pdf, txt, doc)을 
+        # type 목록에 강제로 포함시켜, 안드로이드 OS가 무조건 '내 파일(탐색기)' 앱을 호출하도록 유도합니다.
         raw_files = st.file_uploader(
             "📁 옵션 분석데이터 (CSV/Excel) 업로드", 
             type=["csv", "xlsx", "xls", "pdf", "txt", "doc", "zip"], 
@@ -439,6 +322,7 @@ with st.sidebar:
         )
         st.caption("로컬/모바일 기기에 저장된 CSV 또는 Excel 파일을 선택하세요.")
         
+        # 파이썬 서버단에서 올바른 확장자인지 강력하게 2차 검증 (필터링)
         up_files = []
         if raw_files:
             valid_exts = ['.csv', '.xls', '.xlsx']
@@ -536,12 +420,7 @@ if main_menu == MENU_DATA:
         st.success(f"✅ 업로드 완료 — 전체 {stats.get('total_rows', len(df_ext)):,}행 적용 완료")
 
         if stats.get("failed_files"):
-            warning_msg = "변환 실패 파일:
-
-" + "
-
-".join(f"· {x}" for x in stats["failed_files"])
-            st.warning(warning_msg)
+            st.warning("변환 실패 파일:\n\n" + "\n\n".join(f"· {x}" for x in stats["failed_files"]))
 
         master_info = load_master_data(st.session_state["master_version"])
         rep = merge_report(master_info, df_ext)
@@ -599,8 +478,7 @@ if run_button:
     
     if main_menu == MENU_PRICE:
         with st.spinner(f"[{engine_version}] 가격 모델 연산 중..."):
-            result_df, meta, t_start, t_end = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
-            master_df, _ = get_ready_master()
+            result_df, meta = run_quant_engine(engine_version, mode_selection, target_date, target_start, target_end)
         
         if result_df.empty:
             if meta.get("price_error"): st.error("❌ 기초자산 시세(EWY Price) 정보를 찾지 못했습니다. 마스터 파일 데이터를 확인하세요.")
@@ -608,11 +486,6 @@ if run_button:
         else:
             anchor = meta.get("anchor_date")
             anchor_str = pd.to_datetime(anchor).strftime("%Y-%m-%d") if anchor is not None else "-"
-            
-            # 가격 모드에서도 다차원 유사도 매칭 실행 (기초자산가격, 거래량, IV, OI의 4차원 공간 비교)
-            with st.spinner("시장 세력 포지셔닝 기반 과거 유사 패턴 검색 중..."):
-                match_df = find_multidimensional_similar_patterns(master_df, t_start, t_end)
-            
             st.success(f"✅ 가격 모델 완료 ({mode_selection}) · **기준일 {anchor_str}** · 누적 {meta.get('n_dates', 0)}일")
             
             stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -624,9 +497,7 @@ if run_button:
                 "id": uuid.uuid4().hex[:8],
                 "title": f"📌 [{stamp}] 가격(방어벽) 엔진 - {engine_version} | {detail}",
                 "data": result_df,
-                "match_data": match_df,
-                "type": "price",
-                "days_count": len(result_df)
+                "type": "price" 
             })
             st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
@@ -654,9 +525,8 @@ if run_button:
                         cols_to_show = ['Quote Date', 'EWY_Price', 'DD_10', 'Pos_20D', 'Backwardation_Flag', 'Put_Skew_진단', 'Regime']
                         out_df = sel[cols_to_show].copy()
                         
-                        t_start = out_df["Quote Date"].min()
-                        t_end = out_df["Quote Date"].max()
-                        anchor_str = pd.to_datetime(t_end).strftime("%Y-%m-%d")
+                        anchor = out_df["Quote Date"].max()
+                        anchor_str = pd.to_datetime(anchor).strftime("%Y-%m-%d")
                         
                         out_df['Quote Date'] = out_df['Quote Date'].dt.strftime('%m-%d')
                         out_df['EWY_Price'] = out_df['EWY_Price'].round(2)
@@ -665,10 +535,6 @@ if run_button:
                         out_df['Pos_20D'] = (out_df['Pos_20D'].replace([np.inf, -np.inf], np.nan).fillna(0.5) * 100).round(0).astype(int).astype(str) + '%'
                         
                         out_df = out_df.rename(columns={'Quote Date': 'Date', 'EWY_Price': f'{SYMBOL}($)', 'Backwardation_Flag': 'Backward(역조)'})
-
-                        # 거래량 모드에서도 동일한 다차원 유사도 매칭 실행
-                        with st.spinner("시장 세력 포지셔닝 기반 과거 유사 패턴 검색 중..."):
-                            match_df = find_multidimensional_similar_patterns(master_df, t_start, t_end)
 
                         st.success(f"✅ 거래량 레짐 모델 완료 ({mode_selection}) · **기준일 {anchor_str}**")
 
@@ -680,9 +546,7 @@ if run_button:
                             "id": uuid.uuid4().hex[:8],
                             "title": f"📊 [{stamp}] 거래량(레짐) 엔진 - V28.4 | {detail}",
                             "data": out_df,
-                            "match_data": match_df,
-                            "type": "volume",
-                            "days_count": len(out_df)
+                            "type": "volume" 
                         })
                         st.session_state["analysis_history"] = st.session_state["analysis_history"][:MAX_HISTORY]
 
@@ -711,12 +575,5 @@ if st.session_state["analysis_history"]:
                 st.markdown(generate_new_window_link(record['data'], record['title']), unsafe_allow_html=True)
             with btn_col2:
                 st.button("❌ 삭제", key=f"del_{record['id']}", on_click=remove_history_item, args=(record["id"],), use_container_width=True)
-            
             st.dataframe(record["data"], use_container_width=True, hide_index=True)
-            
-            # 옵션 가격 분석 및 거래량 분석 공통: 다차원 유사도 매칭 결과 출력
-            if record.get("match_data") is not None and not record["match_data"].empty:
-                st.markdown(f"🔍 **시장 세력 포지셔닝 기반 가장 유사한 과거 패턴 Top 3** (기초자산 가격, 거래량, 미결제약정(OI), IV 종합 기준 · 최근 {record.get('days_count', 0)}일)")
-                st.dataframe(record["match_data"], use_container_width=True)
-                
             st.write("")
