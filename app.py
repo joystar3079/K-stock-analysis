@@ -168,8 +168,6 @@ def generate_new_window_link(df, title):
 # (옵션 가격 분석 및 거래량 분석 공통 지원)
 # =====================================================================
 def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
-    # docstring 제거 및 순수 주석으로 대체하여 Indentation Error 방지
-    # 마스터 데이터를 일자별 다차원 특징(거래량, 내재변동성, 미결제약정, 기초자산가격 등)으로 집계
     if "Quote Date" not in master_df.columns:
         return pd.DataFrame()
         
@@ -199,7 +197,6 @@ def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start_date, target_end_date) -> pd.DataFrame:
-    # 기초자산 가격, 거래량, IV, OI의 4차원 스케일링을 통해 과거(2024년~) 유사 패턴 Top 3 추출
     daily_df = get_daily_master_summary(master_df)
     if daily_df.empty: return pd.DataFrame()
     
@@ -520,11 +517,8 @@ if main_menu == MENU_DATA:
         st.success(f"✅ 업로드 완료 — 전체 {stats.get('total_rows', len(df_ext)):,}행 적용 완료")
 
         if stats.get("failed_files"):
-            st.warning("변환 실패 파일:
-
-" + "
-
-".join(f"· {x}" for x in stats["failed_files"]))
+            warning_msg = "변환 실패 파일:\n\n" + "\n\n".join(f"· {x}" for x in stats["failed_files"])
+            st.warning(warning_msg)
 
         master_info = load_master_data(st.session_state["master_version"])
         rep = merge_report(master_info, df_ext)
