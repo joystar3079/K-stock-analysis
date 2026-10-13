@@ -3,7 +3,7 @@
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
-  · [오류 수정] 최신 안드로이드 스마트폰(갤럭시)에서 파일 업로드 시 카메라/갤러리만 뜨는 문제 해결 (MIME 및 확장자 필터 제거 후 서버단 검증으로 우회)
+  · [오류 수정] 삼성 갤럭시 One UI 최신버전 '내 파일' 강제 호출 패치 완료
 """
 from __future__ import annotations
 
@@ -309,20 +309,20 @@ with st.sidebar:
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
         
-        # [모바일 안드로이드/갤럭시 브라우저 버그 완벽 우회]
-        # 안드로이드 최신 버전(특히 삼성 인터넷/모바일 크롬)에서 type 파라미터가 있으면 MIME 정책 충돌로
-        # 파일 탐색기 대신 '카메라/갤러리'만 띄우는 심각한 버그가 존재합니다.
-        # 이를 해결하기 위해 type 제한을 아예 풀어서 시스템의 '내 파일(기기 폴더)'이 무조건 열리게 강제하고,
-        # 사용자가 올린 파일이 엑셀/CSV가 맞는지는 파이썬 백엔드(업로드 후 처리)에서 걸러내도록 설계했습니다.
+        # [모바일 안드로이드/One UI 8.0 브라우저 버그 완벽 우회 핵심 패치]
+        # type=["csv", "xlsx"]처럼 좁게 지정하면 폰에서 '내 파일'을 띄우지 않고 미디어 갤러리만 띄웁니다.
+        # 이를 해결하기 위해 카메라/갤러리 앱이 절대 지원할 수 없는 범용 문서 포맷(pdf, txt, doc)을 
+        # type 목록에 강제로 포함시켜, 안드로이드 OS가 무조건 '내 파일(탐색기)' 앱을 호출하도록 유도합니다.
         raw_files = st.file_uploader(
             "📁 옵션 분석데이터 (CSV/Excel) 업로드", 
+            type=["csv", "xlsx", "xls", "pdf", "txt", "doc", "zip"], 
             accept_multiple_files=True, 
             label_visibility="collapsed",
-            help="안드로이드 '내 파일' 강제 호출을 위해 모든 파일이 선택 가능하게 열려있습니다. CSV나 Excel 파일만 선택해주세요."
+            help="안드로이드 '내 파일' 강제 호출을 위해 pdf, txt가 목록에 열려있습니다. 실제로는 CSV/Excel 데이터만 선택해주세요."
         )
         st.caption("로컬/모바일 기기에 저장된 CSV 또는 Excel 파일을 선택하세요.")
         
-        # 파이썬 서버단에서 올바른 확장자인지 검증 (필터링)
+        # 파이썬 서버단에서 올바른 확장자인지 강력하게 2차 검증 (필터링)
         up_files = []
         if raw_files:
             valid_exts = ['.csv', '.xls', '.xlsx']
@@ -334,7 +334,7 @@ with st.sidebar:
                     invalid_files.append(f.name)
             
             if invalid_files:
-                st.error(f"❌ 지원되지 않는 파일 포맷이 제외되었습니다: {', '.join(invalid_files)}")
+                st.error(f"❌ 지원되지 않는 파일 포맷이 제외되었습니다 (CSV/Excel만 가능): {', '.join(invalid_files)}")
 
         if up_files:
             st.caption(f"유효한 파일 {len(up_files)}개 — 마스터에 누적 병합됩니다.")
