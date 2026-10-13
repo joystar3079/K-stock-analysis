@@ -309,7 +309,13 @@ with st.sidebar:
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
         
-        up_files = st.file_uploader("📁 옵션 분석데이터 (CSV/Excel) 업로드", type=["csv", "xlsx", "xls"], accept_multiple_files=True, label_visibility="collapsed")
+        # 모바일(안드로이드/iOS) 브라우저에서 '내 파일' 탐색기가 정상적으로 열리도록 MIME Type 명시적 추가
+        up_files = st.file_uploader(
+            "📁 옵션 분석데이터 (CSV/Excel) 업로드", 
+            type=["csv", "xlsx", "xls", "text/csv", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"], 
+            accept_multiple_files=True, 
+            label_visibility="collapsed"
+        )
         st.caption("로컬/코랩 환경에서 생성한 완성형 CSV 파일을 드래그 앤 드롭 하세요.")
         
         if up_files:
