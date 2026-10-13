@@ -1,11 +1,11 @@
-app_code = """\"\"\"EWY Quant Analytics V34 — Streamlit UI.
+"""EWY Quant Analytics V34 — Streamlit UI.
 
 [V34 파일 업로드 전용 경량화 & 다중 분석 모듈 탑재] 
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
   · [오류 수정] 삼성 갤럭시 One UI 최신버전 '내 파일' 강제 호출 패치 완료
   · [기능 추가] 다차원 유사도 패턴 분석 (옵션 가격, 옵션 거래량 모두 Top3 추출 지원)
-\"\"\"
+"""
 from __future__ import annotations
 
 import json
@@ -40,7 +40,7 @@ st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V34", page_icon="📈",
 # =====================================================================
 # [웹 UI 전용 CSS]
 # =====================================================================
-st.markdown(\"\"\"
+st.markdown("""
 <style>
 div[data-testid="column"] button[kind="secondary"] {
     width: 100% !important; height: 32px !important; min-height: 32px !important;
@@ -63,7 +63,7 @@ div[data-testid="column"] button[kind="secondary"]:hover {
 .custom-new-window-btn:hover { border-color: #FF4B4B; color: #FF4B4B; }
 div[data-testid="stMarkdownContainer"] > p { margin-bottom: 0px !important; }
 </style>
-\"\"\", unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # =====================================================================
 # [클라우드 저장소] 퀵링크 영구 저장/불러오기
@@ -117,7 +117,7 @@ def hide_vol_explanation():
 # =====================================================================
 # [지표 설명자료 MD]
 # =====================================================================
-VOLUME_EXPLANATION_MD = \"\"\"
+VOLUME_EXPLANATION_MD = """
 #### 1. 산출 원리 (2단계 연산 구조)
 코드 내부에서는 다음 두 단계를 거쳐 **Put_Skew_Pct**를 산출합니다.
 
@@ -142,11 +142,11 @@ VOLUME_EXPLANATION_MD = \"\"\"
 | **75% ~ 89%** *(하방 경계심 고조)* | OTM 풋옵션 수요가 뚜렷하게 증가하며 스큐가 가팔라지는 구간 | **• 조정 구간 (DD_10 ≤ -6%):** 기간구조 역전(Backwardation)과 결합 시 Regime 1 진입 조건 충족 |
 | **25% ~ 74%** *(중립 / 평상시)* | 콜/풋옵션의 수급 균형이 유지되는 일반적인 시장 상태 | **• 중립 구간:** 스큐 단독으로는 특이 시그널 없음 (거래량 및 미결제약정 증감으로 방향성 판별) |
 | **0% ~ 24%** *(극단적 안도/과열)* | 하방 보험 수요가 완전히 소멸하거나, 상방 콜옵션 수요가 몰린 상태 | **• 고점 부근:** 하락 공포를 잊은 FOMO 구간. 기관의 OI 청산 동반 시 Regime 2(고점 엑시트) 위험 급증 |
-\"\"\"
+"""
 
 def generate_new_window_link(df, title):
     html_content = df.to_html(index=False, justify='center')
-    html_template = f\"\"\"
+    html_template = f"""
     <!DOCTYPE html>
     <html><head><meta charset="utf-8"><title>{title}</title>
     <style>
@@ -158,9 +158,9 @@ def generate_new_window_link(df, title):
     <h2>{title}</h2>
     {html_content}
     </body></html>
-    \"\"\"
-    b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8').replace('\\n', '')
-    btn_html = f\"\"\"<a href="javascript:void(0);" onclick="var w=window.open(); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">↗️ 새창 열기</a>\"\"\"
+    """
+    b64 = base64.b64encode(html_template.encode('utf-8')).decode('utf-8').replace('\n', '')
+    btn_html = f"""<a href="javascript:void(0);" onclick="var w=window.open(); w.document.write(decodeURIComponent(escape(atob('{b64}')))); w.document.close();" class="custom-new-window-btn">↗️ 새창 열기</a>"""
     return btn_html
 
 # =====================================================================
@@ -168,7 +168,8 @@ def generate_new_window_link(df, title):
 # (옵션 가격 분석 및 거래량 분석 공통 지원)
 # =====================================================================
 def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
-    """마스터 데이터를 일자별 다차원 특징(거래량, 내재변동성, 미결제약정, 기초자산가격 등)으로 집계"""
+    # docstring 제거 및 순수 주석으로 대체하여 Indentation Error 방지
+    # 마스터 데이터를 일자별 다차원 특징(거래량, 내재변동성, 미결제약정, 기초자산가격 등)으로 집계
     if "Quote Date" not in master_df.columns:
         return pd.DataFrame()
         
@@ -179,11 +180,10 @@ def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
     
     df_clean['Quote Date'] = pd.to_datetime(df_clean['Quote Date']).dt.tz_localize(None).dt.normalize()
     
-    # 일별 요약 변수 생성
     daily = df_clean.groupby('Quote Date').agg({
         'Volume': 'sum',
         'Open Interest': 'sum',
-        'Implied Volatility': lambda x: x[x > 0].mean() if len(x[x > 0]) > 0 else 0, # 유효한 IV 평균
+        'Implied Volatility': lambda x: x[x > 0].mean() if len(x[x > 0]) > 0 else 0,
         'EWY Price': 'last'
     }).reset_index()
     
@@ -199,7 +199,7 @@ def get_daily_master_summary(master_df: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start_date, target_end_date) -> pd.DataFrame:
-    """기초자산 가격, 거래량, IV, OI의 4차원 스케일링을 통해 과거(2024년~) 유사 패턴 Top 3 추출"""
+    # 기초자산 가격, 거래량, IV, OI의 4차원 스케일링을 통해 과거(2024년~) 유사 패턴 Top 3 추출
     daily_df = get_daily_master_summary(master_df)
     if daily_df.empty: return pd.DataFrame()
     
@@ -210,7 +210,7 @@ def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start
     window_size = len(target_data)
     
     if window_size < 3:
-        return pd.DataFrame() # 패턴을 비교하기에 기간이 너무 짧음
+        return pd.DataFrame() 
         
     history_df = daily_df[(daily_df['Date'] >= '2024-01-01') & (daily_df['Date'] < target_data['Date'].min())].reset_index(drop=True)
     
@@ -231,7 +231,6 @@ def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start
         start_date = history_df.iloc[i]['Date']
         end_date = history_df.iloc[i + window_size - 1]['Date']
         
-        # 미래 T+5 수익률 계산
         if (i + window_size - 1 + 5) < len(history_df):
             t5_price = history_df.iloc[i + window_size - 1 + 5]['Close_Price']
             curr_price = history_df.iloc[i + window_size - 1]['Close_Price']
@@ -243,7 +242,6 @@ def find_multidimensional_similar_patterns(master_df: pd.DataFrame, target_start
 
     distances.sort(key=lambda x: x[0])
     
-    # 겹치는 구간 제거 (Non-overlapping)
     top_matches = []
     for dist, s_date, e_date, t5_ret in distances:
         overlap = False
@@ -522,7 +520,11 @@ if main_menu == MENU_DATA:
         st.success(f"✅ 업로드 완료 — 전체 {stats.get('total_rows', len(df_ext)):,}행 적용 완료")
 
         if stats.get("failed_files"):
-            st.warning("변환 실패 파일:\n\n" + "\n\n".join(f"· {x}" for x in stats["failed_files"]))
+            st.warning("변환 실패 파일:
+
+" + "
+
+".join(f"· {x}" for x in stats["failed_files"]))
 
         master_info = load_master_data(st.session_state["master_version"])
         rep = merge_report(master_info, df_ext)
@@ -590,7 +592,7 @@ if run_button:
             anchor = meta.get("anchor_date")
             anchor_str = pd.to_datetime(anchor).strftime("%Y-%m-%d") if anchor is not None else "-"
             
-            # 가격 모드에서도 다차원 유사도 분석 (EWY 가격, 총 거래량, 평균 IV, 미결제약정 반영) 실행
+            # 가격 모드에서도 다차원 유사도 매칭 실행 (기초자산가격, 거래량, IV, OI의 4차원 공간 비교)
             with st.spinner("시장 세력 포지셔닝 기반 과거 유사 패턴 검색 중..."):
                 match_df = find_multidimensional_similar_patterns(master_df, t_start, t_end)
             
@@ -695,13 +697,9 @@ if st.session_state["analysis_history"]:
             
             st.dataframe(record["data"], use_container_width=True, hide_index=True)
             
-            # 공통: 다차원 유사도 매칭 결과가 있으면 하단에 추가 출력
+            # 옵션 가격 분석 및 거래량 분석 공통: 다차원 유사도 매칭 결과 출력
             if record.get("match_data") is not None and not record["match_data"].empty:
-                st.markdown(f"🔍 **시장 세력 포지셔닝 기반 가장 유사한 과거 패턴 Top 3** (기초자산 가격, 거래량, 미결제약정, IV 종합 기준 · 최근 {record.get('days_count', 0)}일)")
+                st.markdown(f"🔍 **시장 세력 포지셔닝 기반 가장 유사한 과거 패턴 Top 3** (기초자산 가격, 거래량, 미결제약정(OI), IV 종합 기준 · 최근 {record.get('days_count', 0)}일)")
                 st.dataframe(record["match_data"], use_container_width=True)
                 
             st.write("")
-"""
-
-with open('app_new.py', 'w', encoding='utf-8') as f:
-    f.write(app_code)
