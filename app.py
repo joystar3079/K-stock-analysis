@@ -4,7 +4,7 @@
   · 야후 API 의존성 완전 제거 (마스터 파일 내장 주가 자체 추출)
   · 사이드바 메뉴 분기: [옵션 가격(방어벽) 분석] vs [옵션 거래량(레짐) 분석]
   · [오류 수정] 삼성 갤럭시 One UI 최신버전 '내 파일' 강제 호출 패치 완료
-  · [오류 수정] st.dataframe 동적 JS 모듈 로드 실패 원천 차단 패치
+  · [오류 수정] st.dataframe 동적 JS 모듈 로드 실패 원천 차단 & 다크모드 고가독성 테이블 적용
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ st.set_page_config(
 )
 
 # =====================================================================
-# [웹 UI 전용 CSS]
+# [웹 UI 전용 CSS] - 다크모드 고대비 가독성 테이블 반영
 # =====================================================================
 st.markdown("""
 <style>
@@ -90,28 +90,41 @@ div[data-testid="column"] button[data-testid="stBaseButton-secondary"]:hover {
 div[data-testid="stMarkdownContainer"] > p { margin-bottom: 0px !important; }
 
 .quant-table-wrapper {
-    width: 100%; max-height: 460px; overflow-x: auto; overflow-y: auto;
-    border: 1px solid rgba(128, 128, 128, 0.25); border-radius: 8px;
-    margin-top: 6px; margin-bottom: 14px;
+    width: 100%; max-height: 500px; overflow-x: auto; overflow-y: auto;
+    border: 1px solid #2E3A4E; border-radius: 8px;
+    background-color: #0F151E;
+    margin-top: 6px; margin-bottom: 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
 }
 .quant-table {
-    width: 100%; border-collapse: collapse; font-size: 13px;
-    text-align: center; white-space: nowrap;
+    width: 100%; border-collapse: collapse; font-size: 13.5px;
+    text-align: center; white-space: nowrap; color: #F1F5F9;
 }
 .quant-table thead th {
     position: sticky; top: 0; z-index: 2;
-    background-color: var(--secondary-background-color, #f0f2f6);
-    color: var(--text-color, #31333F); font-weight: 600; padding: 8px 12px;
-    border-bottom: 1px solid rgba(128, 128, 128, 0.3);
-    border-right: 1px solid rgba(128, 128, 128, 0.15);
+    background: linear-gradient(180deg, #243044 0%, #1B2536 100%) !important;
+    color: #FFFFFF !important; font-weight: 700; font-size: 13.5px;
+    padding: 11px 14px; letter-spacing: 0.2px;
+    border-bottom: 2px solid #3B4C66;
+    border-right: 1px solid #2E3A4E;
+}
+.quant-table tbody tr:nth-child(odd) {
+    background-color: #0F151E;
+}
+.quant-table tbody tr:nth-child(even) {
+    background-color: #151D2A;
 }
 .quant-table tbody td {
-    padding: 7px 12px; color: var(--text-color, #31333F);
-    border-bottom: 1px solid rgba(128, 128, 128, 0.15);
-    border-right: 1px solid rgba(128, 128, 128, 0.1);
+    padding: 10px 14px; color: #F1F5F9 !important; font-weight: 500;
+    border-bottom: 1px solid #232E3F;
+    border-right: 1px solid #1E2736;
+}
+.quant-table tbody td:first-child,
+.quant-table tbody td:nth-child(2) {
+    color: #FFFFFF !important; font-weight: 600;
 }
 .quant-table tbody tr:hover {
-    background-color: rgba(128, 128, 128, 0.08);
+    background-color: #212E42 !important;
 }
 </style>
 """, unsafe_allow_html=True)
