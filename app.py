@@ -34,20 +34,26 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title=f"{SYMBOL} Quant Analytics V34", page_icon="📈", layout="wide")
 
 # =====================================================================
-# [웹 UI 전용 CSS]
+# [웹 UI 전용 CSS] - 최신 Streamlit DOM 업데이트 반영
 # =====================================================================
 st.markdown("""
 <style>
-div[data-testid="column"] button[kind="secondary"] {
+div[data-testid="column"] button[kind="secondary"],
+div[data-testid="column"] button[data-testid="baseButton-secondary"],
+div[data-testid="column"] button[data-testid="stBaseButton-secondary"] {
     width: 100% !important; height: 32px !important; min-height: 32px !important;
     padding: 0px !important; border-radius: 6px !important;
     border: 1px solid rgba(128, 128, 128, 0.4) !important;
     background-color: transparent !important; color: var(--text-color) !important;
 }
-div[data-testid="column"] button[kind="secondary"] p {
+div[data-testid="column"] button[kind="secondary"] p,
+div[data-testid="column"] button[data-testid="baseButton-secondary"] p,
+div[data-testid="column"] button[data-testid="stBaseButton-secondary"] p {
     font-size: 13px !important; margin: 0px !important; font-weight: 500 !important;
 }
-div[data-testid="column"] button[kind="secondary"]:hover {
+div[data-testid="column"] button[kind="secondary"]:hover,
+div[data-testid="column"] button[data-testid="baseButton-secondary"]:hover,
+div[data-testid="column"] button[data-testid="stBaseButton-secondary"]:hover {
     border-color: #FF4B4B !important; color: #FF4B4B !important;
 }
 .custom-new-window-btn {
@@ -280,7 +286,7 @@ with col_links:
                 save_quick_links(st.session_state["quick_links"])
                 st.session_state["edit_links_mode"] = False
                 st.session_state["show_link_success"] = True
-                st.rerun()
+            st.rerun() # 최신 버전 대응을 위해 spinner 바깥으로 배치
 
 st.divider()
 
@@ -309,10 +315,6 @@ with st.sidebar:
         st.markdown("#### ⛁ 데이터 병합 및 관리")
         st.checkbox(f"변환 즉시 GitHub 마스터 자동 반영", value=True, key="auto_push")
         
-        # [모바일 안드로이드/One UI 8.0 브라우저 버그 완벽 우회 핵심 패치]
-        # type=["csv", "xlsx"]처럼 좁게 지정하면 폰에서 '내 파일'을 띄우지 않고 미디어 갤러리만 띄웁니다.
-        # 이를 해결하기 위해 카메라/갤러리 앱이 절대 지원할 수 없는 범용 문서 포맷(pdf, txt, doc)을 
-        # type 목록에 강제로 포함시켜, 안드로이드 OS가 무조건 '내 파일(탐색기)' 앱을 호출하도록 유도합니다.
         raw_files = st.file_uploader(
             "📁 옵션 분석데이터 (CSV/Excel) 업로드", 
             type=["csv", "xlsx", "xls", "pdf", "txt", "doc", "zip"], 
@@ -322,7 +324,6 @@ with st.sidebar:
         )
         st.caption("로컬/모바일 기기에 저장된 CSV 또는 Excel 파일을 선택하세요.")
         
-        # 파이썬 서버단에서 올바른 확장자인지 강력하게 2차 검증 (필터링)
         up_files = []
         if raw_files:
             valid_exts = ['.csv', '.xls', '.xlsx']
@@ -381,26 +382,28 @@ with st.sidebar:
         st.markdown("<br>", unsafe_allow_html=True)
         
         st.markdown("#### ◱ 분석 모드")
-        mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석", "타임머신 (특정일)", "구간 조회"), label_visibility="collapsed")
+        # 🔥 치명적 에러 수정: 중복되는 라벨을 구분하기 위한 명시적 고유 key 할당 완료
+        mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석", "타임머신 (특정일)", "구간 조회"), label_visibility="collapsed", key="mode_price")
         target_date = target_start = target_end = None
         if mode_selection == "타임머신 (특정일)":
-            target_date = st.date_input("기준일 선택", datetime.today())
+            target_date = st.date_input("기준일 선택", datetime.today(), key="date_price")
         elif mode_selection == "구간 조회":
             c1, c2 = st.columns(2)
-            with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
-            with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
+            with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1), key="start_price")
+            with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30), key="end_price")
             
         run_button = st.button("🚀 가격 방어벽 엔진 가동", type="primary", use_container_width=True)
 
     # ── [메뉴 3] 옵션 거래량(레짐) 분석 ────────────────────────────────
     elif main_menu == MENU_VOL:
         st.markdown("#### 📊 거래량 기반 레짐 분석")
-        mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석 (15일)", "구간 조회"), label_visibility="collapsed")
+        # 🔥 치명적 에러 수정: 다른 메뉴와 충돌하지 않도록 명시적 고유 key 할당 완료
+        mode_selection = st.selectbox("조회 방식", ("최근 시그널 분석 (15일)", "구간 조회"), label_visibility="collapsed", key="mode_vol")
         target_date = target_start = target_end = None
         if mode_selection == "구간 조회":
             c1, c2 = st.columns(2)
-            with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1))
-            with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30))
+            with c1: target_start = st.date_input("시작일", datetime(2026, 6, 1), key="start_vol")
+            with c2: target_end = st.date_input("종료일", datetime(2026, 6, 30), key="end_vol")
             
         run_button = st.button("🚀 거래량 레짐 엔진 가동", type="primary", use_container_width=True)
 
@@ -466,10 +469,9 @@ if main_menu == MENU_DATA:
                     st.session_state.pop("push_error", None)
                     st.session_state["master_version"] = uuid.uuid4().hex[:8]
                     load_master_data.clear()
-                    st.rerun()
                 except Exception as e:
                     st.session_state["push_error"] = str(e)
-                    st.rerun()
+            st.rerun() # 최신버전 에러 방지를 위해 spinner, try-except 블록 밖으로 안전 배치
 
 # =====================================================================
 # [결과 화면 2] 분석 모듈별 실행 로직
