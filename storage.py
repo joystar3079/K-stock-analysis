@@ -116,11 +116,27 @@ class LocalStore:
             fh.write(data)
         os.replace(tmp, fp)
 
-    def delete(self, path, message=""):
+    def walk(self, prefix):
+        """prefix 폴더 아래 모든 파일 (하위 폴더 포함)"""
+        base, out = self._abs(prefix), []
+        for d, ds, fs in os.walk(base):
+            ds.sort()
+            for n in sorted(fs):
+                fp = os.path.join(d, n)
+                st = os.stat(fp)
+                rel = os.path.relpath(fp, self.root).replace(os.sep, "/")
+                out.append(Entry(n, rel, f"{st.st_size}-{st.st_mtime_ns}", st.st_size))
+        return out
+
+    def delete(self, path, message="", sha=None):
         try:
             os.remove(self._abs(path))
         except FileNotFoundError:
             pass
+        d = os.path.dirname(self._abs(path))           # 빈 폴더는 정리 (깃허브처럼)
+        while d.startswith(self.root + os.sep) and os.path.isdir(d) and not os.listdir(d):
+            os.rmdir(d)
+            d = os.path.dirname(d)
 
     def modified(self, path):
         """마지막으로 바뀐 때(UTC). 깃 저장소면 마지막 커밋 시각 (예약 수집에서 파일 시각은 받은 시각이라 쓸 수 없음)"""
@@ -225,10 +241,45 @@ class GithubStore:
                     continue
                 raise StoreError(f"깃허브에 저장하지 못했습니다 ({self._status(ex)}): {ex}") from ex
 
-    def delete(self, path, message=""):
-        e = self._meta(path)
-        if e is not None:
-            self.repo.delete_file(path, message or f"delete {path}", e.sha, branch=self.branch)
+    def walk(self, prefix):
+        """prefix 폴더 아래 모든 파일 — 저장소 트리를 한 번에 받아 걸러냄 (폴더마다 묻지 않음)"""
+        from github import GithubException
+        prefix = str(prefix).strip("/")
+        try:
+            tree = self.repo.get_git_tree(self.branch, recursive=True)
+        except GithubException as e:
+            if self._status(e) in (404, 409):                  # 빈 저장소
+                return []
+            raise
+        if (getattr(tree, "raw_data", None) or {}).get("truncated"):      # 아주 큰 저장소: 폴더별로
+            out, todo = [], [prefix]
+            while todo:
+                d = todo.pop()
+                out += self.list(d)
+                todo += [f"{d}/{n}" for n in self.list_dirs(d)]
+            return sorted(out, key=lambda e: e.path)
+        out = [Entry(t.path.rsplit("/", 1)[-1], t.path, t.sha, int(t.size or 0))
+               for t in tree.tree if t.type == "blob" and t.path.startswith(prefix + "/")]
+        return sorted(out, key=lambda e: e.path)
+
+    def delete(self, path, message="", sha=None):
+        from github import GithubException
+        if sha is None:
+            e = self._meta(path)
+            if e is None:
+                return
+            sha = e.sha
+        try:
+            self.repo.delete_file(path, message or f"delete {path}", sha, branch=self.branch)
+        except GithubException as ex:
+            if self._status(ex) == 404:                          # 이미 지워짐
+                return
+            if self._status(ex) in (409, 422):                   # 목록을 받은 뒤 바뀜 -> 지금 것으로 한 번 더
+                e = self._meta(path)
+                if e is not None:
+                    self.repo.delete_file(path, message or f"delete {path}", e.sha, branch=self.branch)
+                return
+            raise StoreError(f"깃허브에서 지우지 못했습니다 ({self._status(ex)}): {ex}") from ex
 
     def modified(self, path):
         try:
@@ -434,12 +485,55 @@ def latest_snapshot(store):
 # ==============================================================================
 # 4. 신호 기록 · 보고서
 # ==============================================================================
-def read_signal(store):
-    return store.read(SIGNAL_PATH)
+def read_signal(store, path=None):
+    return store.read(path or SIGNAL_PATH)
 
 
-def save_signal(store, data, message=""):
-    store.write(SIGNAL_PATH, data, message or "신호 기록·채점 갱신")
+def save_signal(store, data, message="", path=None):
+    store.write(path or SIGNAL_PATH, data, message or "신호 기록·채점 갱신")
+
+
+def signal_files(store):
+    """[(저장소 경로, 화면 이름)] — 기본 기록(V4.3.7 이후 엔진 공용) + 예전 엔진 전용 기록(EWY_신호기록_채점_V4.3.6.csv 등)"""
+    out = [(SIGNAL_PATH, "기본 (V4.3.7 이후 엔진)")]
+    for e in store.list(DATA_DIR):
+        m = re.match(r"^EWY_신호기록_채점_(V\d+(?:\.\d+)+)\.csv$", e.name)
+        if m:
+            out.append((e.path, f"{m.group(1)} 전용"))
+    return out
+
+
+def signal_path_for(version):
+    """예전 엔진(EWY_SIGNAL_LOG_DIR을 모르는 V4.3.6 등) 전용 기록 파일 — 기본 기록의 열을 지우거나 같은 날 기록을 덮어쓰지 않게 따로 둠"""
+    return f"{DATA_DIR}/EWY_신호기록_채점_{version}.csv"
+
+
+# ==============================================================================
+# 분석 보고서 보관함 (reports/기준일/)
+#   프롬프트(데이터북): Tier5_PC_20261124_093412__V4.3.7.txt
+#   최종 보고서:        Tier5_PC_20261124_093412__V4.3.7_보고서.html
+#   이름에 엔진 버전이 없는 것은 엔진 선택 기능 전에 앱이 만든 것(V4.3.7만 있던 때)
+# ==============================================================================
+REPORT_RE = re.compile(r"^Tier(?P<tier>\d)_(?P<fmt>PC|MOBILE)_(?P<date>\d{8})_(?P<time>\d{6})"
+                       r"(?:__(?P<ver>V\d+(?:\.\d+)*))?(?P<kind>_보고서\.html|\.txt)$")
+LEGACY_REPORT_VERSION = "V4.3.7"
+
+
+def report_items(store):
+    """보관함의 프롬프트·최종 보고서 목록 (새것 먼저) — dict: path·name·sha·size·kind(prompt/report)·date·time·tier·ver·stem"""
+    out = []
+    for e in store.walk(REPORT_DIR):
+        m = REPORT_RE.match(e.name)
+        if not m:
+            continue
+        d, t = m.group("date"), m.group("time")
+        out.append({"path": e.path, "name": e.name, "sha": e.sha, "size": e.size,
+                    "kind": "report" if m.group("kind").endswith(".html") else "prompt",
+                    "date": f"{d[:4]}-{d[4:6]}-{d[6:]}", "time": f"{t[:2]}:{t[2:4]}", "stamp": d + t,
+                    "tier": m.group("tier"), "fmt": m.group("fmt"), "ver": m.group("ver") or LEGACY_REPORT_VERSION,
+                    "stem": e.name[: -len(m.group("kind"))]})
+    out.sort(key=lambda x: (x["stamp"], x["kind"] == "report"), reverse=True)
+    return out
 
 
 def report_dates(store, n=15):

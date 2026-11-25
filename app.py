@@ -171,20 +171,30 @@ def get_master_download(key, _m, name):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_signal_bytes(_store, bust):
-    return storage.read_signal(_store)
+def get_signal_bytes(_store, bust, path=None):
+    return storage.read_signal(_store, path)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_signal_files(_store, bust):
+    return storage.signal_files(_store)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def get_report_list(_store, bust):
-    """최근 12개 기준일 폴더의 데이터북 (새것 먼저)"""
+def get_report_items(_store, bust):
+    """보관함의 프롬프트·최종 보고서 전부 (새것 먼저) — 저장소 트리를 한 번에 읽음"""
+    return storage.report_items(_store)
+
+
+@st.cache_data(max_entries=6, show_spinner=False)
+def get_report_bytes(_store, path, sha):
+    return _store.read(path, sha=sha)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_engines(_store, bust):
     import engine_service
-    out = []
-    for d in storage.report_dates(_store, 12):
-        for e in sorted(storage.report_files(_store, d), key=lambda e: e.name, reverse=True):
-            if engine_service.DATABOOK_RE.match(e.name):
-                out.append((d, e.name, e.path, e.sha, e.size))
-    return out
+    return engine_service.list_engines(_store)
 
 
 def bump(*what):
@@ -194,8 +204,11 @@ def bump(*what):
         get_sources.clear()
     if "signal" in what:
         get_signal_bytes.clear()
+        get_signal_files.clear()
     if "reports" in what:
-        get_report_list.clear()
+        get_report_items.clear()
+    if "engines" in what:
+        get_engines.clear()
 
 
 def load_data():
@@ -472,13 +485,17 @@ except Exception as e:
 MENU_DATA = "⛁ 데이터 관리"
 MENU_PRICE = "🛡️ 옵션 가격(방어벽) 분석"
 MENU_VOL = "📊 옵션 거래량(레짐) 분석"
-MENU_ENGINE = "🧠 분석 엔진 V4.3.7"
+MENU_ENGINE = "🧠 분석 엔진"
+MENU_ARCHIVE = "🗂 분석 보고서 보관함"
 MENU_SIGNAL = "📋 신호 기록·채점"
+MENUS = [MENU_DATA, MENU_PRICE, MENU_VOL, MENU_ENGINE, MENU_ARCHIVE, MENU_SIGNAL]
+if st.session_state.get("main_menu") not in MENUS:          # 예전 메뉴 이름이 남아 있으면 처음으로
+    st.session_state.pop("main_menu", None)
+ENGINES_LIST, SEL_ENGINE = [], None
 
 with st.sidebar:
     st.markdown("### 📌 메인 메뉴")
-    main_menu = st.radio("메뉴 선택", [MENU_DATA, MENU_PRICE, MENU_VOL, MENU_ENGINE, MENU_SIGNAL],
-                         label_visibility="collapsed", key="main_menu")
+    main_menu = st.radio("메뉴 선택", MENUS, label_visibility="collapsed", key="main_menu")
     st.divider()
     run_button = collect_button = engine_button = False
 
@@ -536,7 +553,23 @@ with st.sidebar:
 
     elif main_menu == MENU_ENGINE:
         import engine_service
-        st.markdown("#### 🧠 분석 엔진 V4.3.7")
+        st.markdown("#### 🧠 분석 엔진")
+        try:
+            ENGINES_LIST = get_engines(STORE, st.session_state.get("bust", 0))
+        except Exception as e:
+            st.error(f"엔진 목록을 읽지 못했습니다: {type(e).__name__}: {e}")
+        eng_by_path = {x["path"]: x for x in ENGINES_LIST}
+        if st.session_state.get("eng_pick_next") in eng_by_path:     # 방금 추가한 엔진을 고른 상태로
+            st.session_state["eng_pick"] = st.session_state.pop("eng_pick_next")
+        if st.session_state.get("eng_pick") not in eng_by_path:
+            st.session_state.pop("eng_pick", None)
+        if eng_by_path:
+            eng_pick = st.selectbox("엔진 버전", list(eng_by_path), key="eng_pick",
+                                    format_func=lambda p_: engine_service.engine_label(eng_by_path[p_], ENGINES_LIST))
+            SEL_ENGINE = eng_by_path[eng_pick]
+            st.caption(engine_service.SIGNAL_TEXT.get(SEL_ENGINE["signal_mode"], ""))
+        else:
+            st.warning("저장소 engine/ 폴더에 분석 엔진 파일이 없습니다.")
         tier = st.selectbox("분석 창", [t for t, _ in engine_service.TIERS],
                             format_func=lambda t: dict(engine_service.TIERS)[t], key="eng_tier")
         date_mode = st.radio("기준일", ["최신 기준일", "날짜 지정"], horizontal=True, key="eng_date_mode")
@@ -545,8 +578,13 @@ with st.sidebar:
             eng_date = st.date_input("기준일 선택", date_default(DATES), key="eng_date")
         fmt = st.radio("보고서 형식", ["3분할 (휴대폰 권장)", "PC (데이터북 1개)"], key="eng_fmt")
         binance = st.checkbox("바이낸스 EWYBUSDT 1시간봉 동시 회귀", value=True, key="eng_binance")
-        engine_button = st.button("🚀 분석 실행", type="primary", use_container_width=True, disabled=MASTER is None)
-        st.caption("한 번에 1~3분 걸립니다. 결과 프롬프트는 깃허브 reports/ 에 보관되어 나중에 다시 열 수 있습니다.")
+        engine_button = st.button("🚀 분석 실행", type="primary", use_container_width=True,
+                                  disabled=MASTER is None or not (SEL_ENGINE and SEL_ENGINE["ok"]))
+        st.caption("한 번에 1~3분 걸립니다. 프롬프트와 최종 보고서는 깃허브 reports/ 에 쌓여 🗂 분석 보고서 보관함에서 언제든 봅니다.")
+
+    elif main_menu == MENU_ARCHIVE:
+        st.markdown("#### 🗂 분석 보고서 보관함")
+        st.caption("최종 보고서를 엔진 버전·Tier별로 골라 봅니다. 오래된 보고서와 프롬프트는 '보고서 정리' 탭에서 골라 지웁니다.")
 
     elif main_menu == MENU_SIGNAL:
         st.markdown("#### 📋 신호 기록·채점")
@@ -788,7 +826,7 @@ if run_button:
 
 
 # =====================================================================
-# [결과 화면 3] 분석 엔진 V4.3.7
+# [결과 화면 3] 분석 엔진 (버전 선택)
 # =====================================================================
 def show_split(sp, key):
     """3분할 프롬프트 + 표 뷰어"""
@@ -851,12 +889,17 @@ def show_final_report_form(databook_name, databook_bytes, key):
 
 if main_menu == MENU_ENGINE:
     import engine_service
-    info = engine_service.engine_info()
-    if not info.get("ok"):
-        st.error(f"❌ 분석 엔진 파일 문제: {info.get('error')}")
-    if engine_button and MASTER is not None:
+    if st.session_state.get("eng_add_msg"):
+        st.success(st.session_state.pop("eng_add_msg"))
+    if SEL_ENGINE:
+        with st.expander(f"선택한 엔진: {engine_service.engine_label(SEL_ENGINE, ENGINES_LIST)} · {SEL_ENGINE['name']}"):
+            st.caption(SEL_ENGINE.get("title") or "")
+            st.caption(engine_service.SIGNAL_TEXT.get(SEL_ENGINE["signal_mode"], ""))
+        if not SEL_ENGINE["ok"]:
+            st.error(f"❌ 이 엔진 파일은 실행할 수 없습니다: {SEL_ENGINE.get('error')}")
+    if engine_button and MASTER is not None and SEL_ENGINE:
         prog = st.progress(0.0, text="분석 엔진 시작…")
-        with st.status("분석 엔진 실행 중… (1~3분)", expanded=False) as box:
+        with st.status(f"분석 엔진 {SEL_ENGINE['version']} 실행 중… (1~3분)", expanded=False) as box:
             weights = {1: (0, 10), 2: (10, 5), 3: (15, 78), 4: (93, 7)}
 
             def _prog(stage, frac, text):
@@ -867,7 +910,7 @@ if main_menu == MENU_ENGINE:
                 if any(k in line for k in ("🚀", "[저장 완료]", "[경고]", "Error", "오류")):
                     box.write(line.strip()[:200])
 
-            res = engine_service.run(STORE, MASTER, tier=tier, split=fmt.startswith("3분할"),
+            res = engine_service.run(STORE, MASTER, engine=SEL_ENGINE, tier=tier, split=fmt.startswith("3분할"),
                                      date="latest" if eng_date is None else pd.Timestamp(eng_date).strftime("%Y-%m-%d"),
                                      binance=binance, on_progress=_prog, on_log=_log)
             box.update(label=res.get("title", "끝"), state="complete" if res.get("status") == "ok" else "error")
@@ -882,8 +925,11 @@ if main_menu == MENU_ENGINE:
     res = st.session_state.get("engine_result")
     if res:
         if res.get("status") == "ok":
-            st.success(f"✅ {res.get('title')} · {res.get('seconds', 0)}초"
-                       + (" · 신호 기록·채점 갱신" if res.get("signal_saved") else ""))
+            sig_note = ""
+            if res.get("signal_saved"):
+                sig_note = " · 신호 기록·채점 갱신" + ("" if res.get("signal_file") == storage.SIGNAL_PATH
+                                                  else f" ({res.get('engine_version')} 전용 기록)")
+            st.success(f"✅ 엔진 {res.get('engine_version', '')} · {res.get('title')} · {res.get('seconds', 0)}초{sig_note}")
             if res.get("signal_error"):
                 st.warning(f"신호 기록을 저장소에 저장하지 못했습니다: {res['signal_error']}")
             if res.get("save_error"):
@@ -905,28 +951,27 @@ if main_menu == MENU_ENGINE:
                 with st.expander("진행 기록 보기"):
                     st.text("\n".join(res["log_tail"][-60:]))
     st.divider()
-    st.markdown("##### 🗂 보관한 프롬프트 다시 열기")
+    st.markdown("##### 📂 보관한 프롬프트 다시 열기 (최종 보고서 만들기)")
     try:
-        items = get_report_list(STORE, st.session_state.get("bust", 0))
+        prompts = [x for x in get_report_items(STORE, st.session_state.get("bust", 0)) if x["kind"] == "prompt"][:120]
     except Exception as e:
-        items = []
+        prompts = []
         st.caption(f"보관함을 읽지 못했습니다: {e}")
-    if not items:
+    if not prompts:
         st.caption("아직 보관한 프롬프트가 없습니다. 분석을 실행하면 여기에 쌓입니다.")
     else:
-        labels = {}
-        for d, name, path, *_ in items:
-            m = engine_service.DATABOOK_RE.match(name)
-            labels[path] = (f"{d[:4]}-{d[4:6]}-{d[6:]} · Tier {m.group(1)} · {m.group(4)[:2]}:{m.group(4)[2:4]} 작성"
-                            if m else name)
-        pick = st.selectbox("프롬프트", list(labels), format_func=lambda p: labels.get(p, p), key="arch_pick")
+        labels = {x["path"]: f"{x['date']} · Tier {x['tier']} · {x['ver']} · {x['time']} 실행" for x in prompts}
+        if st.session_state.get("arch_pick") not in labels:
+            st.session_state.pop("arch_pick", None)
+        pick = st.selectbox("프롬프트", list(labels), format_func=lambda p_: labels.get(p_, p_), key="arch_pick")
         if st.button("📂 열기 (3분할 · 최종 보고서)", use_container_width=True):
-            d, name, path, sha, size = next(it for it in items if it[2] == pick)
+            it = next(x for x in prompts if x["path"] == pick)
             for k in ("arc_report", "arc_ans1", "arc_ans2", "arc_ans3"):
                 st.session_state.pop(k, None)
             try:
-                data = STORE.read(path, sha=sha)
-                st.session_state["archive"] = {"name": name, "data": data, "split": engine_service.make_split(name, data)}
+                data = STORE.read(it["path"], sha=it["sha"])
+                st.session_state["archive"] = {"name": it["name"], "data": data,
+                                               "split": engine_service.make_split(it["name"], data)}
             except Exception as e:
                 st.error(f"열지 못했습니다: {type(e).__name__}: {e}")
         arc = st.session_state.get("archive")
@@ -935,18 +980,160 @@ if main_menu == MENU_ENGINE:
             st.download_button("⬇️ 데이터북 내려받기", arc["data"], file_name=arc["name"], mime="text/plain", key="arc_dl")
             show_split(arc["split"], "arc_sp")
             show_final_report_form(arc["name"], arc["data"], "arc")
+    st.divider()
+    with st.expander("➕ 분석 엔진 파일 추가 (새 버전)"):
+        st.caption("엔진 파일(.py)을 올리면 저장소 engine/ 폴더에 저장되어 위 '엔진 버전' 목록에 바로 나옵니다. "
+                   "버전은 파일 첫 줄의 [V4.3.8 · 날짜] 같은 표시로 알아냅니다.")
+        up_eng = st.file_uploader("엔진 파일 (.py)", type=None, key="eng_up")
+        if up_eng is not None:
+            data = up_eng.getvalue()
+            if not up_eng.name.lower().endswith(".py"):
+                st.error("파이썬(.py) 파일만 올릴 수 있습니다.")
+            else:
+                inf = engine_service.inspect_bytes(data, up_eng.name)
+                if not inf["ok"]:
+                    st.error(f"❌ {inf['error']}")
+                elif inf["version"] == "V0":
+                    st.error("❌ 엔진 첫 줄에서 버전 표시([V4.3.8 · 날짜] 같은)를 찾지 못했습니다.")
+                else:
+                    same = [x for x in ENGINES_LIST if x["version"] == inf["version"]]
+                    st.info(f"**{inf['version']}** · {engine_service.SIGNAL_TEXT.get(inf['signal_mode'], '')}\n\n{inf['title'][:240]}")
+                    ok_write = True
+                    if same:
+                        ok_write = st.checkbox(f"이미 있는 {inf['version']} ({same[0]['name']})을 이 파일로 바꿉니다", key="eng_up_ow")
+                    if st.button("💾 엔진 저장", type="primary", disabled=not ok_write, key="eng_up_btn"):
+                        saved_path = None
+                        try:
+                            saved_path, _ = engine_service.add_engine(STORE, up_eng.name, data, overwrite=bool(same))
+                        except Exception as e:
+                            st.error(f"저장하지 못했습니다: {type(e).__name__}: {e}")
+                        if saved_path:
+                            st.session_state["eng_add_msg"] = f"✅ {inf['version']} 엔진을 {saved_path}에 저장했습니다. 위 '엔진 버전'에서 고르세요."
+                            st.session_state["eng_pick_next"] = saved_path
+                            bump("engines")
+                            st.rerun()
 
 # =====================================================================
-# [결과 화면 4] 신호 기록·채점
+# [결과 화면 4] 분석 보고서 보관함 — 최종 보고서 보기 · 골라서 지우기
+# =====================================================================
+if main_menu == MENU_ARCHIVE:
+    import engine_service
+    import streamlit.components.v1 as components
+    try:
+        items = get_report_items(STORE, st.session_state.get("bust", 0))
+    except Exception as e:
+        items = []
+        st.error(f"❌ 보관함을 읽지 못했습니다: {type(e).__name__}: {e}")
+    reports = [x for x in items if x["kind"] == "report"]
+    n_prompt = len(items) - len(reports)
+    msg = st.session_state.pop("rep_del_msg", None)
+    if msg:
+        done, fails = msg
+        if done:
+            st.success(f"✅ {done}개를 지웠습니다.")
+        if fails:
+            st.warning("지우지 못한 파일:\n\n" + "\n\n".join(f"· {x}" for x in fails[:20]))
+    if not items:
+        st.info("아직 보관한 보고서가 없습니다. 🧠 분석 엔진에서 분석을 실행하고 [🧾 최종 보고서 만들기]를 누르면 여기에 쌓입니다.")
+    else:
+        dates = sorted({x["date"] for x in items})
+        st.caption(f"최종 보고서 {len(reports):,}개 · 프롬프트 {n_prompt:,}개 · 기준일 {dates[0]} ~ {dates[-1]}")
+        tab_view, tab_del = st.tabs(["📖 최종 보고서 보기", "🗑 보고서 정리 (골라서 지우기)"])
+        with tab_view:
+            if not reports:
+                st.info("최종 보고서가 아직 없습니다. 🧠 분석 엔진 결과 아래 [🧾 최종 보고서 만들기]로 만들면 여기에 보관됩니다.")
+            else:
+                f1, f2 = st.columns(2)
+                vers = ["전체"] + sorted({x["ver"] for x in reports}, key=engine_service.version_key, reverse=True)
+                tiers_ = ["전체"] + sorted({x["tier"] for x in reports})
+                vpick = f1.selectbox("엔진", vers, key="arc_ver_f")
+                tpick = f2.selectbox("Tier", tiers_, key="arc_tier_f", format_func=lambda t: t if t == "전체" else f"Tier {t}")
+                shown = [x for x in reports if vpick in ("전체", x["ver"]) and tpick in ("전체", x["tier"])]
+                if not shown:
+                    st.info("조건에 맞는 최종 보고서가 없습니다.")
+                else:
+                    lab = {x["path"]: f"{x['date']} · Tier {x['tier']} · {x['ver']} · {x['time']} 실행" for x in shown}
+                    if st.session_state.get("arc_pick_rep") not in lab:
+                        st.session_state.pop("arc_pick_rep", None)
+                    pick = st.selectbox(f"보고서 ({len(shown):,}개 · 새것 먼저)", list(lab), format_func=lambda p_: lab[p_],
+                                        key="arc_pick_rep")
+                    it = next(x for x in shown if x["path"] == pick)
+                    try:
+                        data = get_report_bytes(STORE, it["path"], it["sha"])
+                    except Exception as e:
+                        data = None
+                        st.error(f"보고서를 읽지 못했습니다: {type(e).__name__}: {e}")
+                    if data:
+                        st.download_button("⬇️ 이 보고서 내려받기 (HTML)", data, file_name=it["name"], mime="text/html",
+                                           use_container_width=True, key="arc_rep_dl")
+                        components.html(data.decode("utf-8", "replace"), height=900, scrolling=True)
+        with tab_del:
+            st.caption("지울 것을 표의 '선택' 칸에서 고르세요. 오래된 것을 한꺼번에 고르려면 날짜를 정하고 [그 전 것 모두 고르기]를 누르세요. "
+                       "지운 파일은 깃허브 기록(History)에 남아 되살릴 수 있습니다.")
+            ver_n = st.session_state.setdefault("rep_del_ver", 0)
+            preset = st.session_state.get("rep_preset")
+            c1, c2, c3 = st.columns([0.5, 0.25, 0.25])
+            cut_default = (pd.Timestamp(dates[-1]) - pd.Timedelta(days=30)).date()
+            cut = c1.date_input("이 기준일보다 오래된 것", value=cut_default, key="rep_cut")
+            if c2.button("그 전 것 모두 고르기", use_container_width=True, key="rep_cut_btn"):
+                st.session_state["rep_preset"] = str(cut)
+                st.session_state["rep_del_ver"] = ver_n + 1
+                st.rerun()
+            if c3.button("고른 것 모두 풀기", use_container_width=True, key="rep_clear_btn"):
+                st.session_state["rep_preset"] = None
+                st.session_state["rep_del_ver"] = ver_n + 1
+                st.rerun()
+            table = pd.DataFrame([{"선택": bool(preset and x["date"] < preset), "기준일": x["date"],
+                                   "종류": "최종 보고서" if x["kind"] == "report" else "프롬프트", "Tier": x["tier"],
+                                   "엔진": x["ver"], "실행 시각": x["time"], "크기(KB)": max(1, round(x["size"] / 1024))}
+                                  for x in items], index=[x["path"] for x in items])
+            edited = st.data_editor(table, key=f"rep_editor_{ver_n}", hide_index=True, use_container_width=True,
+                                    disabled=[c for c in table.columns if c != "선택"])
+            sel = [p_ for p_, v in zip(edited.index, edited["선택"]) if bool(v)]
+            by_path = {x["path"]: x for x in items}
+            n_rep = sum(1 for p_ in sel if by_path[p_]["kind"] == "report")
+            st.markdown(f"**{len(sel)}개 선택** (최종 보고서 {n_rep} · 프롬프트 {len(sel) - n_rep})")
+            confirm = st.checkbox("선택한 것을 저장소에서 지웁니다", key=f"rep_del_ok_{ver_n}", disabled=not sel)
+            if st.button(f"🗑 선택한 {len(sel)}개 지우기", type="primary", disabled=not (sel and confirm),
+                         key=f"rep_del_btn_{ver_n}"):
+                prog = st.progress(0.0, text="지우는 중…")
+                done, fails = 0, []
+                for i, p_ in enumerate(sel, 1):
+                    x = by_path[p_]
+                    try:
+                        STORE.delete(p_, f"분석 보고서 삭제: {x['name']}", sha=x["sha"])
+                        done += 1
+                    except Exception as e:
+                        fails.append(f"{x['name']}: {type(e).__name__}: {e}"[:200])
+                    prog.progress(i / len(sel), text=f"지우는 중… {i}/{len(sel)}")
+                st.session_state["rep_del_msg"] = (done, fails)
+                st.session_state["rep_preset"] = None
+                st.session_state["rep_del_ver"] = ver_n + 1
+                bump("reports")
+                st.rerun()
+
+# =====================================================================
+# [결과 화면 5] 신호 기록·채점
 # =====================================================================
 if main_menu == MENU_SIGNAL:
     try:
-        sig = get_signal_bytes(STORE, st.session_state.get("bust", 0))
+        sig_files = get_signal_files(STORE, st.session_state.get("bust", 0))
+    except Exception:
+        sig_files = [(storage.SIGNAL_PATH, "기본 (V4.3.7 이후 엔진)")]
+    sig_path = sig_files[0][0]
+    if len(sig_files) > 1:                       # 예전 엔진(V4.3.6 등) 전용 기록이 있으면 골라 봄
+        sig_lab = dict(sig_files)
+        if st.session_state.get("sig_file") not in sig_lab:
+            st.session_state.pop("sig_file", None)
+        sig_path = st.selectbox("기록 파일", list(sig_lab), format_func=lambda p_: sig_lab[p_], key="sig_file")
+    sig_name = sig_path.rsplit("/", 1)[-1]
+    try:
+        sig = get_signal_bytes(STORE, st.session_state.get("bust", 0), sig_path)
     except Exception as e:
         sig = None
         st.error(f"❌ 신호 기록을 읽지 못했습니다: {e}")
     if not sig:
-        st.info("아직 신호 기록 파일이 없습니다. 분석 엔진을 실행하면 data/EWY_신호기록_채점.csv가 만들어집니다.")
+        st.info(f"아직 신호 기록 파일이 없습니다. 분석 엔진을 실행하면 {sig_path}가 만들어집니다.")
     else:
         sdf = storage._read_csv_bytes(sig)
         last = str(sdf["기준일"].dropna().astype(str).max()) if "기준일" in sdf.columns else "-"
@@ -965,8 +1152,8 @@ if main_menu == MENU_SIGNAL:
         if n_rows != "전체":
             view = view.tail(30 if n_rows == "최근 30건" else 100)
         st.dataframe(view.iloc[::-1], hide_index=True, use_container_width=True)
-        st.download_button("⬇️ EWY_신호기록_채점.csv 내려받기", sig, file_name=storage.SIGNAL_NAME, mime="text/csv")
-    with st.expander("📤 신호 기록 파일 바꾸기 (PC에서 쓰던 파일을 넣을 때)"):
+        st.download_button(f"⬇️ {sig_name} 내려받기", sig, file_name=sig_name, mime="text/csv")
+    with st.expander(f"📤 신호 기록 파일 바꾸기 — {sig_name} (PC에서 쓰던 파일을 넣을 때)"):
         up = st.file_uploader("EWY_신호기록_채점.csv", type=["csv"], key="sig_up")
         if up is not None:
             data = up.getvalue()
@@ -981,13 +1168,13 @@ if main_menu == MENU_SIGNAL:
                 st.caption(f"{len(udf):,}건 · 마지막 기준일 {udf['기준일'].astype(str).max()}")
                 if st.checkbox("지금 저장소의 신호 기록을 이 파일로 바꿉니다 (예전 기록은 깃허브 기록에 남음)", key="sig_confirm"):
                     if st.button("💾 바꾸기", type="primary"):
-                        storage.save_signal(STORE, data, "신호 기록 파일 바꾸기 (올림)")
+                        storage.save_signal(STORE, data, f"신호 기록 파일 바꾸기 (올림): {sig_name}", path=sig_path)
                         bump("signal")
                         st.success("바꿨습니다.")
                         st.rerun()
 
 # =====================================================================
-# [결과 화면 5] 히스토리 (가격 · 거래량)
+# [결과 화면 6] 히스토리 (가격 · 거래량)
 # =====================================================================
 if st.session_state["analysis_history"] and main_menu in (MENU_PRICE, MENU_VOL):
     st.divider()
