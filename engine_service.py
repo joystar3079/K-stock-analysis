@@ -169,6 +169,14 @@ def add_engine(store, name, data, overwrite=False):
     return path, info
 
 
+def delete_engine(store, info):
+    """engine/ 폴더에서 엔진 파일 하나를 지움 (그 엔진으로 만든 보고서·신호 기록은 그대로 둠)"""
+    store.delete(info["path"], f"분석 엔진 {info.get('version', '')} 삭제: {info['name']}", sha=info.get("sha"))
+    for cache in (_SRC, _INFO):
+        for k in [k for k in cache if k[0] == info["path"]]:
+            cache.pop(k, None)
+
+
 # ==============================================================================
 # 실행
 # ==============================================================================

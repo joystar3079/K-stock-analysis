@@ -1,10 +1,11 @@
 """EWY Quant Analytics V34 — Streamlit UI (휴대폰·PC 공용)
 
-[데이터 직접 수집 · 깃허브 누적 관리 · 분석 엔진 V4.3.7 통합]
+[데이터 직접 수집 · 깃허브 누적 관리 · 분석 엔진 선택 · 보고서 보관함]
   · ⛁ 데이터 관리: 옵션 데이터를 앱이 야후에서 직접 받아 깃허브 저장소(data/)에 누적 — 매일 아침은 깃허브가 자동 수집
                    (CSV 올리기는 코랩 등에서 만든 파일을 넣을 때만)
   · 🛡️ 옵션 가격(방어벽) 분석 · 📊 옵션 거래량(레짐) 분석: V34 계산 그대로
-  · 🧠 분석 엔진 V4.3.7: 프롬프트(데이터북) · 3분할 · 표 뷰어 · 최종 보고서 (결과는 깃허브 reports/ 에 보관)
+  · 🧠 분석 엔진: engine/ 폴더의 엔진(V4.3.7 · V4.3.6 · V4.3.5 …) 중 골라 실행 · 엔진 올리기·지우기
+  · 🗂 분석 보고서 보관함: 최종 보고서 보기 · 오래된 보고서·프롬프트 골라 지우기
   · 📋 신호 기록·채점: 엔진이 기록·채점한 EWY_신호기록_채점.csv를 깃허브에서 관리
 """
 from __future__ import annotations
@@ -13,19 +14,45 @@ import base64
 import html
 import json
 import os
+import sys
 import time
 import uuid
 import warnings
 from datetime import datetime, timedelta, timezone
 
-import numpy as np
-import pandas as pd
-import streamlit as st
 
-import market
-import quant
-import storage
-from config import ENGINES, MAX_HISTORY, SYMBOL
+# =====================================================================
+# [업데이트 반영] 깃허브에 새 파일을 올리면 스트림잇 서버의 파일은 바뀌지만, 그때 앱을 열어 둔 사람이 없으면
+#  이미 불러온 모듈(engine_service 등)은 예전 것이 그대로 남아 "has no attribute" 오류가 남
+#  -> 이 폴더의 .py 파일이 마지막으로 불러온 뒤에 바뀌었으면 이 폴더의 모듈을 모두 버리고 새로 불러옴
+# =====================================================================
+def _refresh_local_modules():
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        newest = max(os.path.getmtime(os.path.join(here, f)) for f in os.listdir(here) if f.endswith(".py"))
+    except (OSError, ValueError):
+        newest = 0.0
+    last = getattr(sys, "_ewy_modules_at", None)
+    if last is not None and newest <= last:
+        return False
+    for name, mod in list(sys.modules.items()):
+        f = getattr(mod, "__file__", None)
+        if name != "__main__" and f and os.path.dirname(os.path.abspath(f)) == here:
+            del sys.modules[name]
+    sys._ewy_modules_at = max(time.time(), newest)
+    return True
+
+
+MODULES_REFRESHED = _refresh_local_modules()
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
+
+import market  # noqa: E402
+import quant  # noqa: E402
+import storage  # noqa: E402
+from config import ENGINES, MAX_HISTORY, SYMBOL  # noqa: E402
 
 warnings.filterwarnings("ignore")
 os.environ["TZ"] = "KST-9"          # 한국 시각 (스트림잇 서버는 UTC) — 분석 엔진의 파일 이름·보고서 시각도 PC와 같게
@@ -120,6 +147,8 @@ def get_store():
     return storage.open_store(secrets)
 
 
+if MODULES_REFRESHED:          # 예전 storage 모듈로 만든 저장소 객체도 버리고 새로 만듦
+    get_store.clear()
 try:
     STORE = get_store()
 except Exception as e:
@@ -891,6 +920,8 @@ if main_menu == MENU_ENGINE:
     import engine_service
     if st.session_state.get("eng_add_msg"):
         st.success(st.session_state.pop("eng_add_msg"))
+    if st.session_state.get("eng_del_fail"):
+        st.warning("지우지 못한 엔진:\n\n" + "\n\n".join(f"· {x}" for x in st.session_state.pop("eng_del_fail")))
     if SEL_ENGINE:
         with st.expander(f"선택한 엔진: {engine_service.engine_label(SEL_ENGINE, ENGINES_LIST)} · {SEL_ENGINE['name']}"):
             st.caption(SEL_ENGINE.get("title") or "")
@@ -981,7 +1012,8 @@ if main_menu == MENU_ENGINE:
             show_split(arc["split"], "arc_sp")
             show_final_report_form(arc["name"], arc["data"], "arc")
     st.divider()
-    with st.expander("➕ 분석 엔진 파일 추가 (새 버전)"):
+    with st.expander("🧩 분석 엔진 관리 (올리기 · 지우기)"):
+        st.markdown("**➕ 새 엔진 올리기**")
         st.caption("엔진 파일(.py)을 올리면 저장소 engine/ 폴더에 저장되어 위 '엔진 버전' 목록에 바로 나옵니다. "
                    "버전은 파일 첫 줄의 [V4.3.8 · 날짜] 같은 표시로 알아냅니다.")
         up_eng = st.file_uploader("엔진 파일 (.py)", type=None, key="eng_up")
@@ -1012,6 +1044,45 @@ if main_menu == MENU_ENGINE:
                             st.session_state["eng_pick_next"] = saved_path
                             bump("engines")
                             st.rerun()
+
+        st.markdown("---")
+        st.markdown("**🗑 엔진 지우기**")
+        if not ENGINES_LIST:
+            st.caption("지울 엔진이 없습니다.")
+        else:
+            st.caption("지울 엔진을 표의 '선택' 칸에서 고르세요. 엔진을 지워도 그 엔진으로 만든 보고서와 신호 기록은 그대로 남고, "
+                       "엔진 파일도 깃허브 기록(History)에 남아 되살릴 수 있습니다.")
+            ver_e = st.session_state.setdefault("eng_del_ver", 0)
+            sig_word = {"main": "기본 기록", "own": "전용 기록", "none": "없음"}
+            etbl = pd.DataFrame([{"선택": False, "버전": x["version"] if x["version"] != "V0" else "버전 미상",
+                                  "파일": x["name"], "크기(KB)": max(1, round(x["size"] / 1024)),
+                                  "신호 기록": sig_word.get(x["signal_mode"], ""),
+                                  "상태": "최신" if x.get("latest") else ("" if x["ok"] else "실행 불가")}
+                                 for x in ENGINES_LIST], index=[x["path"] for x in ENGINES_LIST])
+            eed = st.data_editor(etbl, key=f"eng_del_tbl_{ver_e}", hide_index=True, use_container_width=True,
+                                 disabled=[c for c in etbl.columns if c != "선택"])
+            esel = [p_ for p_, v in zip(eed.index, eed["선택"]) if bool(v)]
+            if esel and len(esel) == len(ENGINES_LIST):
+                st.warning("엔진을 모두 지우면 새 엔진을 올리기 전까지 분석을 할 수 없습니다.")
+            e_ok = st.checkbox(f"선택한 엔진 {len(esel)}개를 저장소 engine/ 폴더에서 지웁니다", key=f"eng_del_ok_{ver_e}",
+                               disabled=not esel)
+            if st.button(f"🗑 선택한 엔진 {len(esel)}개 지우기", type="primary", disabled=not (esel and e_ok),
+                         key=f"eng_del_btn_{ver_e}"):
+                by_p = {x["path"]: x for x in ENGINES_LIST}
+                done, fails = [], []
+                for p_ in esel:
+                    try:
+                        engine_service.delete_engine(STORE, by_p[p_])
+                        done.append(f"{by_p[p_]['version']} ({by_p[p_]['name']})")
+                    except Exception as e:
+                        fails.append(f"{by_p[p_]['name']}: {type(e).__name__}: {e}"[:200])
+                if done:
+                    st.session_state["eng_add_msg"] = "✅ 엔진을 지웠습니다: " + ", ".join(done)
+                if fails:
+                    st.session_state["eng_del_fail"] = fails
+                st.session_state["eng_del_ver"] = ver_e + 1
+                bump("engines")
+                st.rerun()
 
 # =====================================================================
 # [결과 화면 4] 분석 보고서 보관함 — 최종 보고서 보기 · 골라서 지우기
