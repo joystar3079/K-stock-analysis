@@ -1,0 +1,6 @@
+# 깃허브 예약 수집용 (스트림잇 앱은 requirements.txt)
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+yfinance>=0.2.54
+requests>=2.31
